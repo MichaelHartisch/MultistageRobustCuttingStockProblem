@@ -32,10 +32,6 @@ set(SCENARIO_TREE_SOURCES
 set(INSTANCE_WRITER_SOURCES
     src/InstanceWriter/HelperFunctions.cpp
     src/InstanceWriter/InstanceWriter.cpp
-    src/InstanceWriter/InstanceWriter_DR.cpp
-    src/InstanceWriter/InstanceWriter_DR2.cpp
-    src/InstanceWriter/InstanceWriter_DR_Mod12a.cpp
-    src/InstanceWriter/InstanceWriter_DR_Mod12b.cpp
     src/InstanceWriter/InstanceWriter_Heuristic2.cpp
     src/InstanceWriter/InstanceWriter_MIP.cpp
     src/InstanceWriter/InstanceWriter_MIPasQLP.cpp
@@ -172,6 +168,8 @@ if(BUILD_DECISION_RULE)
         src/CplexSolver/CplexSolver.cpp
         src/InstanceWriter/InstanceWriter_DR_basic.cpp
         src/InstanceWriter/InstanceWriter_DRPrep.cpp
+        src/InstanceWriter/InstanceWriter_DR_Mod12a.cpp
+        src/InstanceWriter/InstanceWriter_DR_Mod12b.cpp
     )
     target_link_libraries(RunDecisionRule PRIVATE instance_writer_core)
     target_include_directories(RunDecisionRule PRIVATE

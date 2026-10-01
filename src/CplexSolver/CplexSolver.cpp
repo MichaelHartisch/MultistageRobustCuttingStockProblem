@@ -1,538 +1,909 @@
-
 #include "CplexSolver.h"
 
-#include <limits>
-#include <ctype.h>
-#include <stdlib.h>
-#include <string>
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <limits>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
-void CplexSolver::free_and_null (char **ptr)
+#include <utility>
+
+void CplexSolver::free_and_null(char** ptr)
 {
-   if ( *ptr != NULL ) {
-      free (*ptr);
+   if (*ptr != NULL) {
+      free(*ptr);
       *ptr = NULL;
    }
-} /* END free_and_null */ 
+}
 
-std::string CplexSolver::statusToString(int statusCode) const {
-   char statusString[CPXMESSAGEBUFSIZE];
-   if (env != NULL && CPXXgetstatstring(env, statusCode, statusString) != NULL) {
-      return std::string(statusString);
+std::string CplexSolver::statusToString(int statusCode) const
+{
+   if (env != NULL) {
+      char statusString[CPXMESSAGEBUFSIZE];
+      if (CPXXgetstatstring(env, statusCode, statusString) != NULL) {
+         return std::string(statusString);
+      }
    }
+
    std::ostringstream oss;
    oss << "CPLEX status " << statusCode;
    return oss.str();
 }
 
-CplexSolver::CplexSolver (char** /*argv*/, std::vector<int> /*SuccessorsInEachStage*/){
-   /* Declare and allocate space for the variables and arrays where we will
-      store the optimization results including the status, objective value,
-      and variable values. */
+void CplexSolver::CheckStatus(int cplexStatus, const std::string& message) const
+{
+   if (cplexStatus == 0) {
+      return;
+   }
 
+   std::ostringstream oss;
+   oss << message << ". CPLEX error code " << cplexStatus;
+
+   if (env != NULL) {
+      char errmsg[CPXMESSAGEBUFSIZE];
+      if (CPXXgeterrorstring(env, cplexStatus, errmsg) != NULL) {
+         oss << ": " << errmsg;
+      }
+   }
+
+   throw std::runtime_error(oss.str());
+}
+
+void CplexSolver::EnsureProblemExists(const std::string& context) const
+{
+   if (lp == NULL) {
+      throw std::runtime_error(context + ": no CPLEX problem has been created");
+   }
+}
+
+void CplexSolver::RememberVariable(const std::string& name, int index)
+{
+   if (!name.empty()) {
+      variableIndexByName[name] = index;
+   }
+}
+
+void CplexSolver::ClearVariableIndexCache()
+{
+   variableIndexByName.clear();
+}
+
+void CplexSolver::RebuildVariableIndexCache()
+{
+   ClearVariableIndexCache();
+
+   if (lp == NULL) {
+      return;
+   }
+
+   const CPXDIM ncols = CPXXgetnumcols(env, lp);
+   if (ncols <= 0) {
+      return;
+   }
+
+   char** colNames = NULL;
+   char* colNameStore = NULL;
+   CPXSIZE surplus = 0;
+
+   int localStatus = CPXXgetcolname(env, lp, NULL, NULL, 0, &surplus, 0, ncols - 1);
+   if (localStatus != CPXERR_NEGATIVE_SURPLUS && localStatus != 0) {
+      CheckStatus(localStatus, "Could not determine space for CPLEX column names");
+   }
+
+   const CPXSIZE nameSpace = -surplus;
+   if (nameSpace <= 0) {
+      return;
+   }
+
+   colNames = static_cast<char**>(malloc(sizeof(*colNames) * ncols));
+   colNameStore = static_cast<char*>(malloc(sizeof(*colNameStore) * nameSpace));
+
+   if (colNames == NULL || colNameStore == NULL) {
+      free(colNames);
+      free(colNameStore);
+      throw std::runtime_error("Failed to allocate memory for CPLEX column names");
+   }
+
+   localStatus = CPXXgetcolname(env, lp,
+                                colNames,
+                                colNameStore,
+                                nameSpace,
+                                &surplus,
+                                0,
+                                ncols - 1);
+   if (localStatus) {
+      free(colNames);
+      free(colNameStore);
+      CheckStatus(localStatus, "CPXXgetcolname failed");
+   }
+
+   for (CPXDIM i = 0; i < ncols; ++i) {
+      if (colNames[i] != NULL) {
+         variableIndexByName[std::string(colNames[i])] = static_cast<int>(i);
+      }
+   }
+
+   free(colNames);
+   free(colNameStore);
+}
+
+CplexSolver::CplexSolver(char** /*argv*/, std::vector<int> /*SuccessorsInEachStage*/)
+{
    x = NULL;
    env = NULL;
    lp = NULL;
+   status = 0;
+   solstat = 0;
+   objval = 0.0;
+   lastObjectiveAvailable = false;
 
-   /* Initialize the CPLEX environment */
-   env = CPXXopenCPLEX (&status);
+   env = CPXXopenCPLEX(&status);
 
-   /* If an error occurs, the status value indicates the reason for
-      failure.  A call to CPXXgeterrorstring will produce the text of
-      the error message.  Note that CPXXopenCPLEX produces no output,
-      so the only way to see the cause of the error is to use
-      CPXXgeterrorstring.  For other CPLEX routines, the errors will
-      be seen if the CPXPARAM_ScreenOutput indicator is set to CPX_ON.  */
-
-   if ( env == NULL ) {
-      char  errmsg[CPXMESSAGEBUFSIZE];
-      fprintf (stderr, "Could not open CPLEX environment.\n");
-      CPXXgeterrorstring (env, status, errmsg);
-      fprintf (stderr, "%s", errmsg);
-      exit (EXIT_FAILURE);
+   if (env == NULL) {
+      std::ostringstream oss;
+      oss << "Could not open CPLEX environment. CPLEX error code " << status;
+      throw std::runtime_error(oss.str());
    }
+
    const unsigned int NUM_THREADS = 1;
-   CPXXsetintparam(env, CPX_PARAM_THREADS, NUM_THREADS);
+   status = CPXXsetintparam(env, CPX_PARAM_THREADS, NUM_THREADS);
+   CheckStatus(status, "Failed to set CPLEX thread count");
 
-   /* Turn on output to the screen */
+   status = CPXXsetintparam(env, CPXPARAM_ScreenOutput, CPX_OFF);
+   CheckStatus(status, "Failure to turn off CPLEX screen output");
+}
 
-   status = CPXXsetintparam (env, CPXPARAM_ScreenOutput, CPX_OFF);
-   if ( status ) {
-      fprintf (stderr, 
-               "Failure to turn on screen indicator, error %d.\n", status);
-      exit (EXIT_FAILURE);
-   }
-   /* Create the problem, using the filename as the problem name */
-} 
-
-int CplexSolver::GetLastSolutionStatus() const
+void CplexSolver::CreateProblem(const std::string& problemName)
 {
-    return lastSolutionStatus;
-}
+   ClearModel();
 
-bool CplexSolver::HasObjectiveValue() const
-{
-    return lastObjectiveAvailable;
-}
-
-bool CplexSolver::IsInfeasible() const
-{
-    // 103 = CPXMIP_INFEASIBLE, "integer infeasible"
-    return lastSolutionStatus == 103;
-}
-
-bool CplexSolver::IsTimeLimit() const
-{
-    // 107 = time limit exceeded with incumbent
-    // 108 = time limit exceeded without incumbent
-    return lastSolutionStatus == 107 || lastSolutionStatus == 108;
-}
-
-double CplexSolver::GetBestBound()
-{
-   double bestBound = 0.0;
-
-   int status = CPXXgetbestobjval(env, lp, &bestBound);
-
-   if (status) {
-      std::ostringstream oss;
-      oss << "Failed to obtain CPLEX best bound. CPLEX error code "
-          << status;
-      throw std::runtime_error(oss.str());
-   }
-
-   return bestBound;
-}
-
-void CplexSolver::SetTimeLimit(double seconds){
-   if (seconds > 0.0) {
-      status = CPXXsetdblparam(env, CPX_PARAM_TILIM, seconds);
-   } else {
-      status = CPXXsetdblparam(env, CPX_PARAM_TILIM, CPX_INFBOUND);
-   }
-   if (status) {
-      std::ostringstream oss;
-      oss << "Failed to set CPLEX time limit. CPLEX error code " << status;
-      throw std::runtime_error(oss.str());
-   }
-}
-
-void CplexSolver::UpdateBound(double lowerBound){
+   lp = CPXXcreateprob(env, &status, problemName.c_str());
    if (lp == NULL) {
-      throw std::runtime_error("Cannot update bound before reading a CPLEX problem");
+      CheckStatus(status, "Failed to create CPLEX problem");
+      throw std::runtime_error("Failed to create CPLEX problem");
    }
-   const std::string name = "obj";
-   CPXDIM colindex = -1;
-   status = CPXXgetcolindex(env, lp, const_cast<char*>(name.c_str()), &colindex);
-   if (status) {
-      std::ostringstream oss;
-      oss << "Could not find objective-bound variable 'obj'. CPLEX error code " << status;
-      throw std::runtime_error(oss.str());
-   }
-   char lu = 'L';
-   status = CPXXchgbds(env, lp, 1, &colindex, &lu, &lowerBound);
-   if (status) {
-      std::ostringstream oss;
-      oss << "Failed to update objective lower bound. CPLEX error code " << status;
-      throw std::runtime_error(oss.str());
-   }
+
+   SetMinimize();
+   ClearVariableIndexCache();
+   LazyRows.clear();
+   hasStoredMipStart = false;
+   storedMipStartAlreadyAdded = false;
+   storedMipStartIndices.clear();
+   storedMipStartValues.clear();
+   lastObjectiveAvailable = false;
+   solstat = 0;
+   objval = 0.0;
 }
 
-int CplexSolver::GetVariableIndexByName(const std::string& variableName){
-   if (lp == NULL) {
-      throw std::runtime_error("Cannot look up CPLEX variable before reading a problem");
-   }
-   CPXDIM colindex = -1;
-   status = CPXXgetcolindex(env, lp, const_cast<char*>(variableName.c_str()), &colindex);
-   if (!status) {
-      return static_cast<int>(colindex);
+void CplexSolver::ClearModel()
+{
+   free_and_null(reinterpret_cast<char**>(&x));
+
+   if (lp != NULL) {
+      status = CPXXfreeprob(env, &lp);
+      CheckStatus(status, "CPXXfreeprob failed while clearing model");
+      lp = NULL;
    }
 
+   ClearVariableIndexCache();
+   LazyRows.clear();
+   hasStoredMipStart = false;
+   storedMipStartAlreadyAdded = false;
+   storedMipStartIndices.clear();
+   storedMipStartValues.clear();
+   lastObjectiveAvailable = false;
+   solstat = 0;
+   objval = 0.0;
+}
+
+bool CplexSolver::HasProblem() const
+{
+   return lp != NULL;
+}
+
+void CplexSolver::SetMinimize()
+{
+   EnsureProblemExists("SetMinimize");
+   status = CPXXchgobjsen(env, lp, CPX_MIN);
+   CheckStatus(status, "Failed to set objective sense to minimization");
+}
+
+void CplexSolver::SetMaximize()
+{
+   EnsureProblemExists("SetMaximize");
+   status = CPXXchgobjsen(env, lp, CPX_MAX);
+   CheckStatus(status, "Failed to set objective sense to maximization");
+}
+
+int CplexSolver::AddVariable(const std::string& name,
+                             double lowerBound,
+                             double upperBound,
+                             char type,
+                             double objectiveCoefficient)
+{
+   EnsureProblemExists("AddVariable");
+
+   if (!name.empty() && FindVariableIndexByName(name) >= 0) {
+      throw std::runtime_error("Variable already exists: " + name);
+   }
+
+   const CPXDIM newIndex = CPXXgetnumcols(env, lp);
+
+   double obj = objectiveCoefficient;
+   double lb = lowerBound;
+   double ub = upperBound;
+   char ctype = type;
+   char* namePtr = const_cast<char*>(name.c_str());
+
+   status = CPXXnewcols(env, lp, 1, &obj, &lb, &ub, &ctype, name.empty() ? NULL : &namePtr);
+   CheckStatus(status, "Failed to add CPLEX variable '" + name + "'");
+
+   RememberVariable(name, static_cast<int>(newIndex));
+   storedMipStartAlreadyAdded = false;
+
+   return static_cast<int>(newIndex);
+}
+
+int CplexSolver::AddContinuousVariable(const std::string& name,
+                                       double lowerBound,
+                                       double upperBound,
+                                       double objectiveCoefficient)
+{
+   return AddVariable(name, lowerBound, upperBound, 'C', objectiveCoefficient);
+}
+
+int CplexSolver::AddBinaryVariable(const std::string& name,
+                                   double objectiveCoefficient)
+{
+   return AddVariable(name, 0.0, 1.0, 'B', objectiveCoefficient);
+}
+
+int CplexSolver::AddIntegerVariable(const std::string& name,
+                                    double lowerBound,
+                                    double upperBound,
+                                    double objectiveCoefficient)
+{
+   return AddVariable(name, lowerBound, upperBound, 'I', objectiveCoefficient);
+}
+
+int CplexSolver::FindVariableIndexByName(const std::string& variableName) const
+{
+   auto it = variableIndexByName.find(variableName);
+   if (it != variableIndexByName.end()) {
+      return it->second;
+   }
+
+   if (lp == NULL) {
+      return -1;
+   }
+
+   CPXDIM colIndex = -1;
+   const int lookupStatus = CPXXgetcolindex(env,
+                                            lp,
+                                            const_cast<char*>(variableName.c_str()),
+                                            &colIndex);
+   if (lookupStatus) {
+      return -1;
+   }
+
+   return static_cast<int>(colIndex);
+}
+
+int CplexSolver::RequireVariableIndex(const std::string& variableName) const
+{
+   const int index = FindVariableIndexByName(variableName);
+   if (index < 0) {
+      throw std::runtime_error("Could not find CPLEX variable: " + variableName);
+   }
+   return index;
+}
+
+int CplexSolver::GetVariableIndexByName(const std::string& variableName)
+{
+   EnsureProblemExists("GetVariableIndexByName");
+
+   const int existingIndex = FindVariableIndexByName(variableName);
+   if (existingIndex >= 0) {
+      RememberVariable(variableName, existingIndex);
+      return existingIndex;
+   }
+
+   /*
+    * Compatibility path for the existing incremental row builder.
+    *
+    * Older code sometimes prepares rows before all referenced variables have
+    * been declared in the initial master. The legacy behavior was to create
+    * such variables on demand. We keep that behavior for now so that the
+    * internal refactor can be done gradually.
+    *
+    * New model builders should prefer explicit Add...Variable(...) calls.
+    */
    double lb = 0.0;
    double ub = 1.0;
    char type = 'B';
-   if (variableName.size() >= 2 && variableName[0] != 'z' &&
+
+   if (variableName.size() >= 2 &&
+       variableName[0] != 'z' &&
        (variableName[1] == 'B' || variableName[1] == 'T')) {
       lb = -CPX_INFBOUND;
       ub = CPX_INFBOUND;
       type = 'C';
    }
 
-   char* namePtr = const_cast<char*>(variableName.c_str());
-   status = CPXXaddcols(env, lp, 1, 0, NULL, NULL, NULL, NULL, &lb, &ub, &namePtr);
-   if (status) {
-      std::ostringstream oss;
-      oss << "Failed to add missing variable '" << variableName << "'. CPLEX error code " << status;
-      throw std::runtime_error(oss.str());
-   }
-   status = CPXXgetcolindex(env, lp, const_cast<char*>(variableName.c_str()), &colindex);
-   if (status) {
-      std::ostringstream oss;
-      oss << "Could not find newly added variable '" << variableName << "'. CPLEX error code " << status;
-      throw std::runtime_error(oss.str());
-   }
-   status = CPXXchgctype(env, lp, 1, &colindex, &type);
-   if (status) {
-      std::ostringstream oss;
-      oss << "Failed to set type of variable '" << variableName << "'. CPLEX error code " << status;
-      throw std::runtime_error(oss.str());
-   }
-   return static_cast<int>(colindex);
+   return AddVariable(variableName, lb, ub, type, 0.0);
 }
 
-void CplexSolver::AddRow(const row& ThisRow){
-   if (lp == NULL) {
-      throw std::runtime_error("Cannot add a row before reading a CPLEX problem");
+void CplexSolver::ChangeLowerBound(int variableIndex, double lowerBound)
+{
+   EnsureProblemExists("ChangeLowerBound");
+   CPXDIM idx = variableIndex;
+   char lu = 'L';
+   double bd = lowerBound;
+   status = CPXXchgbds(env, lp, 1, &idx, &lu, &bd);
+   CheckStatus(status, "Failed to change variable lower bound");
+}
+
+void CplexSolver::ChangeUpperBound(int variableIndex, double upperBound)
+{
+   EnsureProblemExists("ChangeUpperBound");
+   CPXDIM idx = variableIndex;
+   char lu = 'U';
+   double bd = upperBound;
+   status = CPXXchgbds(env, lp, 1, &idx, &lu, &bd);
+   CheckStatus(status, "Failed to change variable upper bound");
+}
+
+void CplexSolver::ChangeBounds(int variableIndex, double lowerBound, double upperBound)
+{
+   EnsureProblemExists("ChangeBounds");
+
+   CPXDIM indices[2] = {variableIndex, variableIndex};
+   char lu[2] = {'L', 'U'};
+   double bd[2] = {lowerBound, upperBound};
+
+   status = CPXXchgbds(env, lp, 2, indices, lu, bd);
+   CheckStatus(status, "Failed to change variable bounds");
+}
+
+void CplexSolver::SetObjectiveCoefficient(int variableIndex, double coefficient)
+{
+   EnsureProblemExists("SetObjectiveCoefficient");
+   CPXDIM idx = variableIndex;
+   double val = coefficient;
+   status = CPXXchgobj(env, lp, 1, &idx, &val);
+   CheckStatus(status, "Failed to change objective coefficient");
+}
+
+void CplexSolver::AddLinearConstraint(const std::string& name,
+                                      const std::vector<int>& indices,
+                                      const std::vector<double>& coefficients,
+                                      char sense,
+                                      double rhs)
+{
+   EnsureProblemExists("AddLinearConstraint");
+
+   if (indices.size() != coefficients.size()) {
+      throw std::runtime_error("Cannot add linear constraint '" + name + "': index/coefficient size mismatch");
    }
-   if (ThisRow.Coef.size() != ThisRow.Index.size()) {
+
+   CPXNNZ rmatbeg = 0;
+   const CPXNNZ nzcnt = static_cast<CPXNNZ>(indices.size());
+   char rowSense = sense;
+   double rowRhs = rhs;
+   char* rowName = const_cast<char*>(name.c_str());
+
+   status = CPXXaddrows(env,
+                        lp,
+                        0,
+                        1,
+                        nzcnt,
+                        &rowRhs,
+                        &rowSense,
+                        &rmatbeg,
+                        nzcnt == 0 ? NULL : const_cast<int*>(indices.data()),
+                        nzcnt == 0 ? NULL : const_cast<double*>(coefficients.data()),
+                        NULL,
+                        name.empty() ? NULL : &rowName);
+   CheckStatus(status, "Failed to add linear constraint '" + name + "'");
+   storedMipStartAlreadyAdded = false;
+}
+
+void CplexSolver::AddIndicatorConstraint(const std::string& name,
+                                         int binaryVariableIndex,
+                                         int complemented,
+                                         const std::vector<int>& indices,
+                                         const std::vector<double>& coefficients,
+                                         char sense,
+                                         double rhs)
+{
+   EnsureProblemExists("AddIndicatorConstraint");
+
+   if (indices.size() != coefficients.size()) {
+      throw std::runtime_error("Cannot add indicator constraint '" + name + "': index/coefficient size mismatch");
+   }
+
+   const CPXNNZ nzcnt = static_cast<CPXNNZ>(indices.size());
+   char* rowName = const_cast<char*>(name.c_str());
+
+   status = CPXXaddindconstr(env,
+                             lp,
+                             binaryVariableIndex,
+                             complemented,
+                             nzcnt,
+                             rhs,
+                             sense,
+                             nzcnt == 0 ? NULL : const_cast<int*>(indices.data()),
+                             nzcnt == 0 ? NULL : const_cast<double*>(coefficients.data()),
+                             name.empty() ? NULL : rowName);
+   CheckStatus(status, "Failed to add indicator constraint '" + name + "'");
+   storedMipStartAlreadyAdded = false;
+}
+
+void CplexSolver::SetTimeLimit(double seconds)
+{
+   if (seconds > 0.0) {
+      status = CPXXsetdblparam(env, CPX_PARAM_TILIM, seconds);
+   } else {
+      status = CPXXsetdblparam(env, CPX_PARAM_TILIM, CPX_INFBOUND);
+   }
+   CheckStatus(status, "Failed to set CPLEX time limit");
+}
+
+void CplexSolver::UpdateBound(double lowerBound)
+{
+   EnsureProblemExists("UpdateBound");
+   const int objIndex = RequireVariableIndex("obj");
+   ChangeLowerBound(objIndex, lowerBound);
+}
+
+void CplexSolver::AddRow(const row& thisRow)
+{
+   EnsureProblemExists("AddRow");
+
+   if (thisRow.Coef.size() != thisRow.Index.size()) {
       throw std::runtime_error("Cannot add CPLEX row: coefficient/index size mismatch");
    }
-   CPXNNZ rmatbeg = 0;
-   CPXNNZ nzcnt = static_cast<CPXNNZ>(ThisRow.Coef.size());
-   if (!ThisRow.IsIndicator) {
-      status = CPXXaddrows(env, lp, 0, 1, nzcnt, &ThisRow.rhs, &ThisRow.sense,
-                           &rmatbeg, ThisRow.Index.data(), ThisRow.Coef.data(), NULL, NULL);
-      if (status) {
-         std::ostringstream oss;
-         oss << "Failed to add CPLEX row. CPLEX error code " << status;
-         throw std::runtime_error(oss.str());
-      }
+
+   if (!thisRow.IsIndicator) {
+      AddLinearConstraint("", thisRow.Index, thisRow.Coef, thisRow.sense, thisRow.rhs);
    } else {
-      status = CPXXaddindconstr(env, lp, ThisRow.IndicatorVariable, ThisRow.complemented,
-                                nzcnt, ThisRow.rhs, ThisRow.sense,
-                                ThisRow.Index.data(), ThisRow.Coef.data(), NULL);
-      if (status) {
-         std::ostringstream oss;
-         oss << "Failed to add CPLEX indicator row. CPLEX error code " << status;
-         throw std::runtime_error(oss.str());
-      }
+      AddIndicatorConstraint("",
+                             thisRow.IndicatorVariable,
+                             thisRow.complemented,
+                             thisRow.Index,
+                             thisRow.Coef,
+                             thisRow.sense,
+                             thisRow.rhs);
    }
 }
 
-void CplexSolver::AddAllNewRows(){
-   for (const row& ThisRow : LazyRows) {
-      AddRow(ThisRow);
+void CplexSolver::AddAllNewRows()
+{
+   for (const row& thisRow : LazyRows) {
+      AddRow(thisRow);
    }
    LazyRows.clear();
 }
 
-void CplexSolver::ReadProblem(char* name){
-   if (lp != NULL) {
-      status = CPXXfreeprob(env, &lp);
-      if (status) {
-         fprintf(stderr, "CPXXfreeprob failed before reading a new problem, error code %d.\n", status);
-         exit(EXIT_FAILURE);
-      }
-   }
-   lp = CPXXcreateprob (env, &status, name);
-
-   /* A returned pointer of NULL may mean that not enough memory
-      was available or there was some other problem.  In the case of 
-      failure, an error message will have been written to the error 
-      channel from inside CPLEX.  In this example, the setting of
-      the parameter CPXPARAM_ScreenOutput causes the error message to
-      appear on stdout.  Note that most CPLEX routines return
-      an error code to indicate the reason for failure.   */
-
-   if ( lp == NULL ) {
-      fprintf (stderr, "Failed to create LP.\n");
-      exit (EXIT_FAILURE);
-   }
-
-   /* Now read the file, and copy the data into the created lp */
-
-   status = CPXXreadcopyprob (env, lp, name, NULL);
-   if ( status ) {
-      fprintf (stderr, "Failed to read and copy the problem data.\n");
-      exit (EXIT_FAILURE);
-   } 
-}
-
-void CplexSolver::ExtractDR(DR_Holder & DR){
-   cur_numcols = CPXXgetnumcols (env, lp);
-
-   /* Allocate space for solution */
-
-   free_and_null ((char **) &x);
-   x = (double*) malloc (cur_numcols*sizeof(*x));
-
-   if ( x == NULL ) {
-      fprintf (stderr, "No memory for solution values.\n");
-      exit (EXIT_FAILURE);
-   }
-
-   status = CPXXgetx (env, lp, x, 0, cur_numcols-1);
-   if ( status ) {
-      fprintf (stderr, "Failed to obtain solution.\n");
-      exit (EXIT_FAILURE);
-   }
-
-
-   char          **cur_colname = NULL;
-   char          *cur_colnamestore = NULL;
-   CPXSIZE       cur_colnamespace;
-   CPXSIZE       surplus;
-
-
-   status = CPXXgetcolname (env, lp, NULL, NULL, 0, &surplus, 0,
-                           cur_numcols-1);
-   if (( status != CPXERR_NEGATIVE_SURPLUS ) &&
-       ( status != 0 )                         )  {
-      fprintf (stderr, 
-               "Could not determine amount of space for column names.\n");
-      exit(0);
-   }
-   cur_colnamespace = - surplus;
-   if ( cur_colnamespace > 0 ) {
-      cur_colname      = (char**) malloc (sizeof(*cur_colname)*cur_numcols);
-      cur_colnamestore = (char*) malloc (sizeof(*cur_colnamestore)*cur_colnamespace);
-      if ( cur_colname      == NULL ||
-           cur_colnamestore == NULL   ) {
-         fprintf (stderr, "Failed to get memory for column names.\n");
-         status = -1;
-         exit(0);
-      }
-      status = CPXXgetcolname (env, lp, cur_colname, cur_colnamestore, 
-                              cur_colnamespace, &surplus, 0, cur_numcols-1);
-      if ( status ) {
-         fprintf (stderr, "CPXXgetcolname failed.\n");
-         exit(0);      }
-   }
-      char          *basismsg;
-
-   for (j = 0; j < cur_numcols; j++) {
-      if ( cur_colnamespace > 0 && cur_colname[j][0]=='y' &&(cur_colname[j][1]=='T' || cur_colname[j][1]=='B') ) {
-         if(0){printf ("%-16s:  ", cur_colname[j]);
-         printf ("%17.10g", x[j]);
-         printf ("\n");}
-         if(cur_colname[j][2]=='_'){
-            DR.set((std::string)cur_colname[j],x[j]);
-         }
-         else DR.setConst((std::string)cur_colname[j],x[j]);
-      }
-      else if(cur_colnamespace > 0 && cur_colname[j][0]=='a' && cur_colname[j][1]=='i' && std::fabs(x[j] - 1.0) <= DR_Holder::BinaryTolerance ) DR.SetFirstStageBar((std::string)cur_colname[j]);
-     
-   }
-   DR.SetOptimalValue(objval);
-}
-
-bool CplexSolver::ExtractScenario(DR_Holder & DR){
-   cur_numcols = CPXXgetnumcols (env, lp);
-
-   /* Allocate space for solution */
-
-   free_and_null ((char **) &x);
-   x = (double*) malloc (cur_numcols*sizeof(*x));
-
-   if ( x == NULL ) {
-      fprintf (stderr, "No memory for solution values.\n");
-      exit (EXIT_FAILURE);
-   }
-
-   status = CPXXgetx (env, lp, x, 0, cur_numcols-1);
-   if ( status ) {
-      fprintf (stderr, "Failed to obtain solution.\n");
+bool CplexSolver::StoreCurrentSolutionAsMipStart()
+{
+   if (lp == NULL) {
+      std::cerr << "Cannot store MIP start before creating a CPLEX problem\n";
       return false;
    }
 
-
-   char          **cur_colname = NULL;
-   char          *cur_colnamestore = NULL;
-   CPXSIZE       cur_colnamespace;
-   CPXSIZE       surplus;
-
-
-   status = CPXXgetcolname (env, lp, NULL, NULL, 0, &surplus, 0,
-                           cur_numcols-1);
-   if (( status != CPXERR_NEGATIVE_SURPLUS ) &&
-       ( status != 0 )                         )  {
-      fprintf (stderr, 
-               "Could not determine amount of space for column names.\n");
-      exit(0);
+   const CPXDIM ncols = CPXXgetnumcols(env, lp);
+   if (ncols <= 0) {
+      std::cerr << "Cannot store MIP start: model has no variables\n";
+      return false;
    }
-   cur_colnamespace = - surplus;
-   if ( cur_colnamespace > 0 ) {
-      cur_colname      = (char**) malloc (sizeof(*cur_colname)*cur_numcols);
-      cur_colnamestore = (char*) malloc (sizeof(*cur_colnamestore)*cur_colnamespace);
-      if ( cur_colname      == NULL ||
-           cur_colnamestore == NULL   ) {
-         fprintf (stderr, "Failed to get memory for column names.\n");
-         status = -1;
-         exit(0);
+
+   std::vector<double> values(static_cast<std::size_t>(ncols), 0.0);
+   status = CPXXgetx(env, lp, values.data(), 0, ncols - 1);
+   if (status) {
+      std::cerr << "Could not extract incumbent solution for MIP start. CPLEX error code "
+                << status << "\n";
+      return false;
+   }
+
+   storedMipStartValues = std::move(values);
+   storedMipStartIndices.resize(static_cast<std::size_t>(ncols));
+   std::iota(storedMipStartIndices.begin(), storedMipStartIndices.end(), 0);
+   hasStoredMipStart = true;
+   storedMipStartAlreadyAdded = false;
+
+   std::cerr << "Stored MIP start with " << ncols << " variable values\n";
+   return true;
+}
+
+bool CplexSolver::AddStoredMipStart()
+{
+   if (!hasStoredMipStart || storedMipStartValues.empty()) {
+      return false;
+   }
+   if (storedMipStartAlreadyAdded) {
+      return false;
+   }
+   if (lp == NULL) {
+      std::cerr << "Cannot add MIP start before creating a CPLEX problem\n";
+      return false;
+   }
+   if (storedMipStartIndices.size() != storedMipStartValues.size()) {
+      std::cerr << "Cannot add MIP start: index/value size mismatch\n";
+      return false;
+   }
+
+   const CPXNNZ nzcnt = static_cast<CPXNNZ>(storedMipStartValues.size());
+   CPXNNZ beg = 0;
+#ifdef CPX_MIPSTART_REPAIR
+   int effort = CPX_MIPSTART_REPAIR;
+#else
+   int effort = CPX_MIPSTART_AUTO;
+#endif
+
+   status = CPXXaddmipstarts(env,
+                             lp,
+                             1,
+                             nzcnt,
+                             &beg,
+                             storedMipStartIndices.data(),
+                             storedMipStartValues.data(),
+                             &effort,
+                             NULL);
+   if (status) {
+      std::cerr << "Warning: failed to add MIP start. CPLEX error code "
+                << status << "\n";
+      return false;
+   }
+
+   storedMipStartAlreadyAdded = true;
+   std::cerr << "Added MIP start with " << storedMipStartValues.size()
+             << " variable values\n";
+   return true;
+}
+
+void CplexSolver::ReadProblem(char* name)
+{
+   ClearModel();
+
+   lp = CPXXcreateprob(env, &status, name);
+   if (lp == NULL) {
+      CheckStatus(status, "Failed to create CPLEX problem before reading LP file");
+      throw std::runtime_error("Failed to create CPLEX problem before reading LP file");
+   }
+
+   status = CPXXreadcopyprob(env, lp, name, NULL);
+   CheckStatus(status, std::string("Failed to read and copy problem data from ") + name);
+
+   RebuildVariableIndexCache();
+   lastObjectiveAvailable = false;
+   solstat = 0;
+   objval = 0.0;
+}
+
+void CplexSolver::ExtractDR(DR_Holder& DR)
+{
+   EnsureProblemExists("ExtractDR");
+
+   cur_numcols = CPXXgetnumcols(env, lp);
+   if (cur_numcols <= 0) {
+      throw std::runtime_error("Cannot extract decision rule: model has no columns");
+   }
+
+   free_and_null(reinterpret_cast<char**>(&x));
+   x = static_cast<double*>(malloc(cur_numcols * sizeof(*x)));
+
+   if (x == NULL) {
+      throw std::runtime_error("No memory for CPLEX solution values");
+   }
+
+   status = CPXXgetx(env, lp, x, 0, cur_numcols - 1);
+   CheckStatus(status, "Failed to obtain solution for decision-rule extraction");
+
+   char** cur_colname = NULL;
+   char* cur_colnamestore = NULL;
+   CPXSIZE cur_colnamespace = 0;
+   CPXSIZE surplus = 0;
+
+   status = CPXXgetcolname(env, lp, NULL, NULL, 0, &surplus, 0, cur_numcols - 1);
+   if (status != CPXERR_NEGATIVE_SURPLUS && status != 0) {
+      CheckStatus(status, "Could not determine amount of space for column names");
+   }
+
+   cur_colnamespace = -surplus;
+   if (cur_colnamespace > 0) {
+      cur_colname = static_cast<char**>(malloc(sizeof(*cur_colname) * cur_numcols));
+      cur_colnamestore = static_cast<char*>(malloc(sizeof(*cur_colnamestore) * cur_colnamespace));
+      if (cur_colname == NULL || cur_colnamestore == NULL) {
+         free(cur_colname);
+         free(cur_colnamestore);
+         throw std::runtime_error("Failed to allocate memory for column names");
       }
-      status = CPXXgetcolname (env, lp, cur_colname, cur_colnamestore, 
-                              cur_colnamespace, &surplus, 0, cur_numcols-1);
-      if ( status ) {
-         fprintf (stderr, "CPXXgetcolname failed.\n");
-         exit(0);      }
+
+      status = CPXXgetcolname(env,
+                              lp,
+                              cur_colname,
+                              cur_colnamestore,
+                              cur_colnamespace,
+                              &surplus,
+                              0,
+                              cur_numcols - 1);
+      if (status) {
+         free(cur_colname);
+         free(cur_colnamestore);
+         CheckStatus(status, "CPXXgetcolname failed");
+      }
    }
-      char          *basismsg;
+
+   for (j = 0; j < cur_numcols; j++) {
+      if (cur_colnamespace > 0 &&
+          cur_colname[j] != NULL &&
+          cur_colname[j][0] == 'y' &&
+          (cur_colname[j][1] == 'T' || cur_colname[j][1] == 'B')) {
+         if (cur_colname[j][2] == '_') {
+            DR.set(std::string(cur_colname[j]), x[j]);
+         } else {
+            DR.setConst(std::string(cur_colname[j]), x[j]);
+         }
+      } else if (cur_colnamespace > 0 &&
+                 cur_colname[j] != NULL &&
+                 cur_colname[j][0] == 'a' &&
+                 cur_colname[j][1] == 'i' &&
+                 std::fabs(x[j] - 1.0) <= DR_Holder::BinaryTolerance) {
+         DR.SetFirstStageBar(std::string(cur_colname[j]));
+      }
+   }
+
+   free(cur_colname);
+   free(cur_colnamestore);
+
+   DR.SetOptimalValue(objval);
+}
+
+bool CplexSolver::ExtractScenario(DR_Holder& DR)
+{
+   EnsureProblemExists("ExtractScenario");
+
+   cur_numcols = CPXXgetnumcols(env, lp);
+   if (cur_numcols <= 0) {
+      return false;
+   }
+
+   free_and_null(reinterpret_cast<char**>(&x));
+   x = static_cast<double*>(malloc(cur_numcols * sizeof(*x)));
+
+   if (x == NULL) {
+      throw std::runtime_error("No memory for CPLEX solution values");
+   }
+
+   status = CPXXgetx(env, lp, x, 0, cur_numcols - 1);
+   if (status) {
+      std::cerr << "Failed to obtain solution for scenario extraction. CPLEX error code "
+                << status << "\n";
+      return false;
+   }
+
+   char** cur_colname = NULL;
+   char* cur_colnamestore = NULL;
+   CPXSIZE cur_colnamespace = 0;
+   CPXSIZE surplus = 0;
+
+   status = CPXXgetcolname(env, lp, NULL, NULL, 0, &surplus, 0, cur_numcols - 1);
+   if (status != CPXERR_NEGATIVE_SURPLUS && status != 0) {
+      CheckStatus(status, "Could not determine amount of space for column names");
+   }
+
+   cur_colnamespace = -surplus;
+   if (cur_colnamespace > 0) {
+      cur_colname = static_cast<char**>(malloc(sizeof(*cur_colname) * cur_numcols));
+      cur_colnamestore = static_cast<char*>(malloc(sizeof(*cur_colnamestore) * cur_colnamespace));
+      if (cur_colname == NULL || cur_colnamestore == NULL) {
+         free(cur_colname);
+         free(cur_colnamestore);
+         throw std::runtime_error("Failed to allocate memory for column names");
+      }
+
+      status = CPXXgetcolname(env,
+                              lp,
+                              cur_colname,
+                              cur_colnamestore,
+                              cur_colnamespace,
+                              &surplus,
+                              0,
+                              cur_numcols - 1);
+      if (status) {
+         free(cur_colname);
+         free(cur_colnamestore);
+         CheckStatus(status, "CPXXgetcolname failed");
+      }
+   }
 
    DR.PrepareForScenarioCollection();
    for (j = 0; j < cur_numcols; j++) {
-      if ( cur_colnamespace > 0 && cur_colname[j][0]=='z' &&cur_colname[j][1]=='_' ) {
-         if(0){printf ("%-16s:  ", cur_colname[j]);
-         printf ("%17.10g", x[j]);
-         printf ("\n");}
-         DR.CollectScenario((std::string)cur_colname[j],x[j]);
-      }     
+      if (cur_colnamespace > 0 &&
+          cur_colname[j] != NULL &&
+          cur_colname[j][0] == 'z' &&
+          cur_colname[j][1] == '_') {
+         DR.CollectScenario(std::string(cur_colname[j]), x[j]);
+      }
    }
+
+   free(cur_colname);
+   free(cur_colnamestore);
+
    return DR.BuildAndAddScenarioString();
 }
 
+void CplexSolver::PrintSolution()
+{
+   EnsureProblemExists("PrintSolution");
 
-void CplexSolver::PrintSolution(){
-   cur_numcols = CPXXgetnumcols (env, lp);
+   cur_numcols = CPXXgetnumcols(env, lp);
 
-   /* Allocate space for solution */
+   free_and_null(reinterpret_cast<char**>(&x));
+   x = static_cast<double*>(malloc(cur_numcols * sizeof(*x)));
 
-   free_and_null ((char **) &x);
-   x = (double*) malloc (cur_numcols*sizeof(*x));
-
-   if ( x == NULL ) {
-      fprintf (stderr, "No memory for solution values.\n");
-      exit (EXIT_FAILURE);
+   if (x == NULL) {
+      throw std::runtime_error("No memory for CPLEX solution values");
    }
 
-   status = CPXXgetx (env, lp, x, 0, cur_numcols-1);
-   if ( status ) {
-      fprintf (stderr, "Failed to obtain solution.\n");
+   status = CPXXgetx(env, lp, x, 0, cur_numcols - 1);
+   if (status) {
+      std::cerr << "Failed to obtain solution. CPLEX error code " << status << "\n";
       return;
    }
 
-   /* Write out the solution */
-   CPXDIM index_p;
+   char** cur_colname = NULL;
+   char* cur_colnamestore = NULL;
+   CPXSIZE cur_colnamespace = 0;
+   CPXSIZE surplus = 0;
 
-   status = CPXXgetcolindex(env, lp, "f_0", &index_p);
-   printf("Status is %d, Num is %d\n",status, index_p);
-
-
-
-   char          **cur_colname = NULL;
-   char          *cur_colnamestore = NULL;
-   CPXSIZE       cur_colnamespace;
-   CPXSIZE       surplus;
-
-
-status = CPXXgetcolname (env, lp, NULL, NULL, 0, &surplus, 0,
-                           cur_numcols-1);
-
-   if (( status != CPXERR_NEGATIVE_SURPLUS ) &&
-       ( status != 0 )                         )  {
-      fprintf (stderr, 
-               "Could not determine amount of space for column names.\n");
-      exit(0);
+   status = CPXXgetcolname(env, lp, NULL, NULL, 0, &surplus, 0, cur_numcols - 1);
+   if (status != CPXERR_NEGATIVE_SURPLUS && status != 0) {
+      CheckStatus(status, "Could not determine amount of space for column names");
    }
 
-   cur_colnamespace = - surplus;
-   if ( cur_colnamespace > 0 ) {
-      cur_colname      = (char**) malloc (sizeof(*cur_colname)*cur_numcols);
-      cur_colnamestore = (char*) malloc (sizeof(*cur_colnamestore)*cur_colnamespace);
-      if ( cur_colname      == NULL ||
-           cur_colnamestore == NULL   ) {
-         fprintf (stderr, "Failed to get memory for column names.\n");
-         status = -1;
-         exit(0);
+   cur_colnamespace = -surplus;
+   if (cur_colnamespace > 0) {
+      cur_colname = static_cast<char**>(malloc(sizeof(*cur_colname) * cur_numcols));
+      cur_colnamestore = static_cast<char*>(malloc(sizeof(*cur_colnamestore) * cur_colnamespace));
+      if (cur_colname == NULL || cur_colnamestore == NULL) {
+         free(cur_colname);
+         free(cur_colnamestore);
+         throw std::runtime_error("Failed to allocate memory for column names");
       }
-      status = CPXXgetcolname (env, lp, cur_colname, cur_colnamestore, 
-                              cur_colnamespace, &surplus, 0, cur_numcols-1);
-      if ( status ) {
-         fprintf (stderr, "CPXXgetcolname failed.\n");
-         exit(0);      }
-   }
-      char          *basismsg;
 
-   if(0)for (j = 0; j < cur_numcols; j++) {
-      if ( cur_colnamespace > 0 ) {
-         printf ("%-16s:  ", cur_colname[j]);
+      status = CPXXgetcolname(env,
+                              lp,
+                              cur_colname,
+                              cur_colnamestore,
+                              cur_colnamespace,
+                              &surplus,
+                              0,
+                              cur_numcols - 1);
+      if (status) {
+         free(cur_colname);
+         free(cur_colnamestore);
+         CheckStatus(status, "CPXXgetcolname failed");
       }
-      else {
-         printf ("Fake%-6.6d      :  ", j);;
-      }
-      printf ("%17.10g", x[j]);
-      printf ("\n");
    }
+
+   for (j = 0; j < cur_numcols; j++) {
+      if (cur_colnamespace > 0 && cur_colname[j] != NULL) {
+         std::cout << cur_colname[j] << ": " << x[j] << "\n";
+      } else {
+         std::cout << "x" << j << ": " << x[j] << "\n";
+      }
+   }
+
+   free(cur_colname);
+   free(cur_colnamestore);
 }
-double CplexSolver::Solve(bool PrintOutput){
-   /* Optimize the problem and obtain solution. */
-   lastSolutionStatus = 0;
+
+double CplexSolver::Solve(bool PrintOutput)
+{
+   EnsureProblemExists("Solve");
+
    lastObjectiveAvailable = false;
+   solstat = 0;
+   objval = std::numeric_limits<double>::quiet_NaN();
 
-   int status = 0;
+   status = CPXXsetintparam(env, CPXPARAM_ScreenOutput, PrintOutput ? CPX_ON : CPX_OFF);
+   CheckStatus(status, "Failed to set CPLEX screen output parameter");
 
-   if(PrintOutput) CPXXsetintparam (env, CPXPARAM_ScreenOutput, CPX_ON);
-   else CPXXsetintparam (env, CPXPARAM_ScreenOutput, CPX_OFF);
+   status = CPXXmipopt(env, lp);
+   CheckStatus(status, "Failed to optimize MIP");
 
-   status = CPXXmipopt (env, lp);
+   solstat = CPXXgetstat(env, lp);
+   //std::cerr << "CPLEX solution status " << solstat << ": "  << statusToString(solstat) << std::endl;
 
-   if ( status ) {
+   status = CPXXgetobjval(env, lp, &objval);
+
+   if (status) {
+      if (IsInfeasible() || IsTimeLimit()) {
+         if (PrintOutput) {
+            std::cerr << "No objective value available for CPLEX status "
+                      << solstat << " (" << statusToString(solstat)
+                      << "), CPLEX error code " << status << ".\n";
+         }
+         lastObjectiveAvailable = false;
+         return std::numeric_limits<double>::quiet_NaN();
+      }
+
       std::ostringstream oss;
-      oss << "Failed to optimize MIP. CPLEX error code " << status;
+      oss << "Failed to obtain objective value. Solver status " << solstat
+          << " (" << statusToString(solstat) << "), CPLEX error code " << status;
       throw std::runtime_error(oss.str());
    }
 
-   lastSolutionStatus = CPXXgetstat(env, lp);
-
-   solstat = CPXXgetstat (env, lp);
-   std::cerr << "CPLEX solution status " << solstat << ": " << statusToString(solstat) << std::endl;
-
-   double objValue = std::numeric_limits<double>::quiet_NaN();
-   status = CPXXgetobjval(env, lp, &objValue);
-
-   if (status) {
-       if (IsInfeasible() || IsTimeLimit()) {
-           if (PrintOutput) {
-               std::cerr
-                   << "No objective value available for CPLEX status "
-                   << lastSolutionStatus
-                   << " (CPLEX error code " << status << ").\n";
-           }
-           return std::numeric_limits<double>::quiet_NaN();
-       }
-
-       std::ostringstream oss;
-       oss << "Failed to obtain objective value. Solver status "
-           << lastSolutionStatus
-           << ", CPLEX error code " << status;
-       throw std::runtime_error(oss.str());
-   }
-
    lastObjectiveAvailable = true;
-   return objValue;
-} 
+   return objval;
+}
 
-void CplexSolver::Clear(){
-     /* Free up the solution */
+double CplexSolver::GetBestBound()
+{
+   EnsureProblemExists("GetBestBound");
 
-   free_and_null ((char **) &x);
+   double bestBound = 0.0;
+   status = CPXXgetbestobjval(env, lp, &bestBound);
+   CheckStatus(status, "Failed to obtain CPLEX best bound");
+   return bestBound;
+}
 
-   /* Free up the problem as allocated by CPXXcreateprob, if necessary */
+int CplexSolver::GetLastSolutionStatus() const
+{
+   return solstat;
+}
 
-   if ( lp != NULL ) {
-      status = CPXXfreeprob (env, &lp);
-      if ( status ) {
-         fprintf (stderr, "CPXXfreeprob failed, error code %d.\n", status);
+bool CplexSolver::HasObjectiveValue() const
+{
+   return lastObjectiveAvailable;
+}
+
+bool CplexSolver::IsInfeasible() const
+{
+#ifdef CPXMIP_INFEASIBLE
+   if (solstat == CPXMIP_INFEASIBLE) {
+      return true;
+   }
+#endif
+   return solstat == 103;
+}
+
+bool CplexSolver::IsTimeLimit() const
+{
+#ifdef CPXMIP_TIME_LIM_FEAS
+   if (solstat == CPXMIP_TIME_LIM_FEAS) {
+      return true;
+   }
+#endif
+#ifdef CPXMIP_TIME_LIM_INFEAS
+   if (solstat == CPXMIP_TIME_LIM_INFEAS) {
+      return true;
+   }
+#endif
+   return solstat == 107 || solstat == 108;
+}
+
+void CplexSolver::Clear()
+{
+   ClearModel();
+
+   if (env != NULL) {
+      status = CPXXcloseCPLEX(&env);
+      if (status) {
+         char errmsg[CPXMESSAGEBUFSIZE];
+         std::cerr << "Could not close CPLEX environment. Error code " << status << "\n";
+         if (CPXXgeterrorstring(env, status, errmsg) != NULL) {
+            std::cerr << errmsg << "\n";
+         }
       }
+      env = NULL;
    }
 
-   /* Free up the CPLEX environment, if necessary */
-
-   if ( env != NULL ) {
-      status = CPXXcloseCPLEX (&env);
-
-      /* Note that CPXXcloseCPLEX produces no output,
-         so the only way to see the cause of the error is to use
-         CPXXgeterrorstring.  For other CPLEX routines, the errors will
-         be seen if the CPXPARAM_ScreenOutput indicator is set to CPX_ON. */
-
-      if ( status ) {
-      char  errmsg[CPXMESSAGEBUFSIZE];
-         fprintf (stderr, "Could not close CPLEX environment.\n");
-         CPXXgeterrorstring (env, status, errmsg);
-         fprintf (stderr, "%s", errmsg);
-      }
-   }
-   std::cerr <<"Done with clear" <<std::endl;
-     
+   std::cerr << "Done with clear" << std::endl;
 }

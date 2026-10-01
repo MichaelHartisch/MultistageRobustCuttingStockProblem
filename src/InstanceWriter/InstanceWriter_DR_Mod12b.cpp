@@ -1,313 +1,719 @@
 #include "InstanceWriter.h"
+
+#include "CplexSolver.h"
+#include "DR_Holder.h"
+
+#include <cmath>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <iostream>
-#include "Variable.h"
 
-std::vector < std::string > InstanceWriter::prepareLines(){
-	std::vector <std::string > Output;
-	for (int b=0; b<NumberOfBars; b++){	
-		std::string NextLine="";	
-		for (int t=1; t<NumberOfStages; t++){		
-			for (int i=0; i<NumberOfItems; i++){
-				NextLine+="+"+ std::to_string(LengthOfItems[i])+"a_"+std::to_string(t)+"_"+ std::to_string(b) + "_"+std::to_string(i)+" ";
-			}
-		}
-		NextLine += "+" + std::to_string(LengthOfInitial) + "ai_"+ std::to_string(b) + " -obj >= " + std::to_string(BarSizes[b]);
-		Output.push_back(NextLine);
-	}
+namespace {
 
-	for (int t=1; t<NumberOfStages; t++){		
-		for (int i=0; i<NumberOfItems; i++){
-			std::string NextLine="";
-			for (int b=0; b<NumberOfBars; b++){	
-				NextLine+= "+a_"+std::to_string(t)+"_"+std::to_string(b) + "_" +std::to_string(i)+" ";
-			}
-			NextLine+="-z_"+std::to_string(t)+"_"+std::to_string(i)+ " -obj >= 0";
-			Output.push_back(NextLine);
+constexpr double kDecisionRuleEpsilon = 1.0;
 
-			NextLine="";
-			for (int b=0; b<NumberOfBars; b++){	
-				NextLine+= "-a_"+std::to_string(t)+"_"+std::to_string(b) + "_" +std::to_string(i)+" ";
-			}
-			NextLine+="+z_"+std::to_string(t)+"_"+std::to_string(i)+ " -obj >= 0";
-			Output.push_back(NextLine);
-		}
-	}
-	if(0)for (std::size_t i = 0; i < Output.size(); ++i)
-		std::cerr <<Output[i]<<std::endl;
-	return Output;
-}
-void InstanceWriter::writeDR_12b(DR_Holder DR,std::string Line, int LineNr){
-	(void)LineNr;
-	//std::cerr<<"Start writing DR_12b-File"<<std::endl;
-
-	Variable AI("ai",  1,  0,  1);
-	AI.AddIndex(0,NumberOfBars);
-
-	vector <Variable> A;
-	for (int t=0;t<NumberOfStages-1;t++){
-		Variable Av("a_"+to_string(t+1),  2,  0,  1);
-		Av.AddIndex(0,NumberOfBars);
-		Av.AddIndex(1,NumberOfItems);
-		A.push_back(Av);
-	}
-
-	vector <Variable> ATop;
-	for (int t=0;t<NumberOfStages-1;t++){
-		Variable Av("aT_"+to_string(t+1),  2,  -1000,  1000,true);
-		Av.AddIndex(0,NumberOfBars);
-		Av.AddIndex(1,NumberOfItems);
-		ATop.push_back(Av);
-	}
-
-	Variable Z("z",  2,  0,  1);
-	Z.AddIndex(0,NumberOfStages,1);
-	Z.AddIndex(1,NumberOfItems);
-
-	vector <Variable> ABot;
-	for (int t=0;t<NumberOfStages-1;t++){
-		Variable Av("aB_"+to_string(t+1),  2,  -1000,  1000);
-		Av.AddIndex(0,NumberOfBars);
-		Av.AddIndex(1,NumberOfItems);
-		ABot.push_back(Av);
-	}
-
-
-	vector <Variable> zTop;
-	for (int t=0;t<NumberOfStages-1;t++){
-		Variable Av("zT_"+to_string(t+1),  3,  0,  1);
-		Av.AddIndex(0,NumberOfBars);
-		Av.AddIndex(1,NumberOfItems);
-		Av.AddIndex(2,P);	
-		zTop.push_back(Av);
-	}
-
-	vector <Variable> zBot;
-	for (int t=0;t<NumberOfStages-1;t++){
-		Variable Av("zB_"+to_string(t+1),  3,  0,  1);
-		Av.AddIndex(0,NumberOfBars);
-		Av.AddIndex(1,NumberOfItems);
-		Av.AddIndex(2,P);	
-		zBot.push_back(Av);
-	}
-
-
-	Variable F("f",  1,  0,  1);
-    F.AddIndex(0,NumberOfBars,0);
-
-    vector <Variable> W;
-	for (int t=0;t<NumberOfStages;t++){
-		Variable Wv("w_"+to_string(t+1),  1,  0,  1);
-		Wv.AddIndex(0,NumberOfBars);
-		W.push_back(Wv);
-	}
-
-	Variable R("r",  1,  0,  MinimumRest);
-    R.AddIndex(0,NumberOfBars);
-
-    Variable NoR("nr",  1,  0,  1);
-    NoR.AddIndex(0,NumberOfBars);
-
-	stringstream mipout;
-	mipout<<BaseName<<"_DR12b.lp";
-	ofstream out(mipout.str().c_str());
-		double eps=1;
-	out.precision(20);
-
-	out<<"MAXIMIZE\n";
-	out <<"obj \n";
-	out<<"\nSUBJECT TO\n";
-	out << Line << endl;
-
-	//Initial Item muss zugewiesen werden
-	for (int b=0; b<NumberOfBars; b++){		
-		out << "+"<< AI.VarName<<"_"<< b <<" ";
-		if(b==DR.FirstStageBar) out << " = 1"<<endl;
-		else  out << " = 0"<<endl;
-	}
-	
-	
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				out << A[t-1].VarName<<"_"<< b << "_"<<  i <<"=1 -> ";
-				out << ATop[t-1].VarName<<"_"<< b << "_"<<  i <<"-";
-				out << ABot[t-1].VarName<<"_"<< b << "_"<<  i <<" <= 0"<<endl;
-			}
-		}
-	}	
-
-	//y(xi^t)=0 => yTop(xi^t) -yBot(xi^t)>=eps
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				out << A[t-1].VarName<<"_"<< b << "_"<<  i <<"=0 -> ";
-				out << ATop[t-1].VarName<<"_"<< b << "_"<<  i <<" -";
-				out << ABot[t-1].VarName<<"_"<< b << "_"<<  i <<" >= " <<eps <<endl;
-			}
-		}
-	}	
-
-
-	/*
-	Variable yTop("yT",  5,  -1000,  1000);
-	yTop.AddIndex(0,NumberOfStages);		//In each stage
-	yTop.AddIndex(1,NumberOfBars);			//We need Variables describing the function for a_b_i 
-	yTop.AddIndex(2,NumberOfItems);			
-	yTop.AddIndex(3,P);						
-	yTop.AddIndex(4,NumberOfItems*(t+1));		//Which depend on all the previous stages 
-*/
-
-
-
-	//ATop(xi^t) >= yBar_p_t*xi
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				for (int p=0;p<P;p++){
-					out << ATop[t-1].VarName<<"_"<< b << "_"<<  i <<" ";
-					for (int stages=0;stages<t;stages++){
-						for (int ii=0; ii<NumberOfItems; ii++){
-							if(abs(DR.yTop[t-1][b][i][p][(stages)*NumberOfItems+ii])>0){
-								if(-DR.yTop[t-1][b][i][p][(stages)*NumberOfItems+ii]>=0) out <<"+";
-								out.precision(10);
-								out << -DR.yTop[t-1][b][i][p][(stages)*NumberOfItems+ii]<<Z.VarName<<"_"<<stages+1<<"_"<<ii << " ";
-							}
-						}
-					}
-					out << " >= "<< DR.yTopConst[t-1][b][i][p]<<endl;
-				}
-			}
-		}
-	}
-
-	//ABot(xi^t) >= yBot_p_t*xi
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				for (int p=0;p<P;p++){
-					out << ABot[t-1].VarName<<"_"<< b << "_"<<  i <<" ";
-					for (int stages=0;stages<t;stages++){
-						for (int ii=0; ii<NumberOfItems; ii++){
-							if(abs(DR.yBot[t-1][b][i][p][(stages)*NumberOfItems+ii])>0){
-								if(-DR.yBot[t-1][b][i][p][(stages)*NumberOfItems+ii]>=0) out <<"+";
-								out << -DR.yBot[t-1][b][i][p][(stages)*NumberOfItems+ii]<<Z.VarName<<"_"<<stages+1<<"_"<<ii << " ";
-							}
-						}
-					}
-					out << " >= "<< DR.yBotConst[t-1][b][i][p]<<endl;
-				}
-			}
-		}
-	}
-
-	// zTop_p_t = 1 => ATop(xi^t) <= yBar_p_t*xi
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				for (int p=0;p<P;p++){
-					out << zTop[t-1].VarName<<"_"<< b << "_"<<  i << "_"<<  p<<" = 1 -> " << ATop[t-1].VarName<<"_"<< b << "_"<<  i <<" ";
-					for (int stages=0;stages<t;stages++){
-						for (int ii=0; ii<NumberOfItems; ii++){
-							if(fabs(DR.yTop[t-1][b][i][p][(stages)*NumberOfItems+ii])>0){
-								if(-DR.yTop[t-1][b][i][p][(stages)*NumberOfItems+ii]>0) out <<"+";
-								out << -DR.yTop[t-1][b][i][p][(stages)*NumberOfItems+ii]<<Z.VarName<<"_"<<stages+1<<"_"<<ii << " ";
-							}
-						}
-					}
-					out << " <= "<< DR.yTopConst[t-1][b][i][p]<<endl;
-				}
-			}
-		}
-	}
-
-	// zBot_p_t = 1 => ABot(xi^t) <= yBot_p_t*xi
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				for (int p=0;p<P;p++){
-					out << zBot[t-1].VarName<<"_"<< b << "_"<<  i << "_"<<  p<<" = 1 -> " << ABot[t-1].VarName<<"_"<< b << "_"<<  i <<" ";
-					for (int stages=0;stages<t;stages++){
-						for (int ii=0; ii<NumberOfItems; ii++){
-							if(fabs(DR.yBot[t-1][b][i][p][(stages)*NumberOfItems+ii])>0){
-								if(-DR.yBot[t-1][b][i][p][(stages)*NumberOfItems+ii]>0) out <<"+";
-								out << -DR.yBot[t-1][b][i][p][(stages)*NumberOfItems+ii]<<Z.VarName<<"_"<<stages+1<<"_"<<ii << " ";
-							}
-						}
-					}
-					out << " <= "<< DR.yBotConst[t-1][b][i][p]<<endl;
-				}
-			}
-		}
-	}
-
-	//sum zT_p_t =1 
-	for (int t=1; t<NumberOfStages; t++){
-		for (int b=0; b<NumberOfBars; b++){		
-			for (int i=0; i<NumberOfItems; i++){
-				for (int p=0;p<P;p++){
-					out << " +"<<zTop[t-1].VarName<<"_"<< b << "_"<<  i << "_"<<  p;	
-				}
-				out << " =1"<<endl;
-				for (int p=0;p<P;p++){
-					out << " +"<< zBot[t-1].VarName<<"_"<< b << "_"<<  i << "_"<<  p;	
-				}
-				out << " =1"<<endl;
-			}
-		}
-	}
-
-	
-	//Pro Stufe genau ein Item
-	for (int t=1; t<NumberOfStages; t++){	
-		for (int i=0; i<NumberOfItems; i++){		
-			out << "+"<< Z.VarName<<"_"<< t<<"_"<<  i <<" ";
-		}
-		out << "=1" <<endl;
-	}
-
-	//Jedes Item genau A_i mal
-	for (int i=0; i<NumberOfItems; i++){	
-		for (int t=1; t<NumberOfStages; t++){	
-			out << "+"<< Z.VarName<<"_"<< t<<"_"<<  i <<" ";
-		}
-		out << "= "<<Partitions[RandPart][i] <<endl;
-	}
-
-	out<<"BOUNDS\n";
-	out <<"obj free" <<endl;
-	AI.Print(out,true);
-	for (int t=0;t<NumberOfStages-1;t++)
-		A[t].Print(out,true);	
-	for (int t=0;t<NumberOfStages-1;t++){
-		ATop[t].Print(out,true,true);
-		ABot[t].Print(out,true,true);
-		zTop[t].Print(out,true);
-		zBot[t].Print(out,true);
-		/*yTop[t].Print(out,true);
-		yBot[t].Print(out,true);*/
-	}
-	Z.Print(out,true);
-
-	
-	//PrintBinaryBounds(out,"q",NumberOfItems,NumberOfItems);
-	//PrintBinaryBounds(out,"x",NumberOfItems,NumberOfItems);
-
-	out<<"BINARIES\n";
-	AI.Print(out);
-	for (int t=0;t<NumberOfStages-1;t++)
-		A[t].Print(out);
-	for (int t=0;t<NumberOfStages-1;t++)
-		zTop[t].Print(out);
-	for (int t=0;t<NumberOfStages-1;t++)
-		zBot[t].Print(out);
-	Z.Print(out);
-
-	out<<"END\n";
-	out.close();
-
-
-	return;
+std::string aiName(int bar) {
+    return "ai_" + std::to_string(bar);
 }
 
+std::string aName(int stageMinusOne, int bar, int item) {
+    return "a_" + std::to_string(stageMinusOne + 1) + "_" +
+           std::to_string(bar) + "_" + std::to_string(item);
+}
+
+std::string aTopName(int stageMinusOne, int bar, int item) {
+    return "aT_" + std::to_string(stageMinusOne + 1) + "_" +
+           std::to_string(bar) + "_" + std::to_string(item);
+}
+
+std::string aBottomName(int stageMinusOne, int bar, int item) {
+    return "aB_" + std::to_string(stageMinusOne + 1) + "_" +
+           std::to_string(bar) + "_" + std::to_string(item);
+}
+
+std::string zTopName(int stageMinusOne, int bar, int item, int piece) {
+    return "zT_" + std::to_string(stageMinusOne + 1) + "_" +
+           std::to_string(bar) + "_" + std::to_string(item) + "_" +
+           std::to_string(piece);
+}
+
+std::string zBottomName(int stageMinusOne, int bar, int item, int piece) {
+    return "zB_" + std::to_string(stageMinusOne + 1) + "_" +
+           std::to_string(bar) + "_" + std::to_string(item) + "_" +
+           std::to_string(piece);
+}
+
+std::string zName(int stage, int item) {
+    return "z_" + std::to_string(stage) + "_" + std::to_string(item);
+}
+
+std::string fName(int bar) {
+    return "f_" + std::to_string(bar);
+}
+
+std::string wName(int stageMinusOne, int bar) {
+    return "w_" + std::to_string(stageMinusOne + 1) + "_" + std::to_string(bar);
+}
+
+std::string rName(int bar) {
+    return "r_" + std::to_string(bar);
+}
+
+std::string nrName(int bar) {
+    return "nr_" + std::to_string(bar);
+}
+
+void addTerm(CplexSolver& solver,
+             std::vector<int>& indices,
+             std::vector<double>& coefficients,
+             const std::string& variableName,
+             double coefficient) {
+    indices.push_back(solver.RequireVariableIndex(variableName));
+    coefficients.push_back(coefficient);
+}
+
+void setObj(CplexSolver& solver, const std::string& variableName, double coefficient) {
+    solver.SetObjectiveCoefficient(solver.RequireVariableIndex(variableName), coefficient);
+}
+
+void addObjectiveConstant(CplexSolver& solver,
+                          const std::string& name,
+                          double value) {
+    if (std::fabs(value) <= 1e-12) {
+        return;
+    }
+
+    /*
+     * CPLEX objectives can have a constant offset, but the lightweight wrapper
+     * currently exposes only variable objective coefficients. A fixed variable
+     * equal to one is a simple and explicit way to encode the offset.
+     */
+    solver.AddContinuousVariable("obj_const_" + name, 1.0, 1.0, value);
+}
+
+double addFixedLinearRuleExpression(CplexSolver& solver,
+                                    std::vector<int>& indices,
+                                    std::vector<double>& coefficients,
+                                    const DR_Holder& decisionRule,
+                                    int stage,
+                                    int numberOfItems,
+                                    int bar,
+                                    int item,
+                                    double sign) {
+    for (int previousStage = 0; previousStage < stage; ++previousStage) {
+        for (int previousItem = 0; previousItem < numberOfItems; ++previousItem) {
+            const int historyIndex = previousStage * numberOfItems + previousItem;
+            const double coefficient =
+                decisionRule.yTop[stage - 1][bar][item][0][historyIndex];
+
+            if (std::fabs(coefficient) > 1e-12) {
+                addTerm(solver,
+                        indices,
+                        coefficients,
+                        zName(previousStage + 1, previousItem),
+                        sign * coefficient);
+            }
+        }
+    }
+
+    return sign * decisionRule.yTopConst[stage - 1][bar][item][0];
+}
+
+double addNegativeFixedPieceExpression(CplexSolver& solver,
+                                       std::vector<int>& indices,
+                                       std::vector<double>& coefficients,
+                                       const DR_Holder& decisionRule,
+                                       int stage,
+                                       int numberOfItems,
+                                       int bar,
+                                       int item,
+                                       int piece,
+                                       bool top) {
+    for (int previousStage = 0; previousStage < stage; ++previousStage) {
+        for (int previousItem = 0; previousItem < numberOfItems; ++previousItem) {
+            const int historyIndex = previousStage * numberOfItems + previousItem;
+
+            const double coefficient =
+                top ? decisionRule.yTop[stage - 1][bar][item][piece][historyIndex]
+                    : decisionRule.yBot[stage - 1][bar][item][piece][historyIndex];
+
+            if (std::fabs(coefficient) > 1e-12) {
+                addTerm(solver,
+                        indices,
+                        coefficients,
+                        zName(previousStage + 1, previousItem),
+                        -coefficient);
+            }
+        }
+    }
+
+    return top ? decisionRule.yTopConst[stage - 1][bar][item][piece]
+               : decisionRule.yBotConst[stage - 1][bar][item][piece];
+}
+
+void addFixedDecisionRuleConstraints(InstanceWriter& writer,
+                                     CplexSolver& solver,
+                                     const DR_Holder& decisionRule) {
+    const bool usePiecewiseRule = (writer.getNumberOfPieces() > 1);
+    const int numberOfStages = writer.getNumberOfStages();
+    const int numberOfBars = writer.getNumberOfBars();
+    const int numberOfItems = writer.getNumberOfItems();
+    const int numberOfPieces = writer.getNumberOfPieces();
+
+    for (int stage = 1; stage < numberOfStages; ++stage) {
+        for (int b = 0; b < numberOfBars; ++b) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                const int assignmentIndex =
+                    solver.RequireVariableIndex(aName(stage - 1, b, i));
+
+                /*
+                 * a = 1 => rule expression <= 0.
+                 */
+                {
+                    std::vector<int> indices;
+                    std::vector<double> coefficients;
+                    double constant = 0.0;
+
+                    if (usePiecewiseRule) {
+                        addTerm(solver, indices, coefficients, aTopName(stage - 1, b, i), 1.0);
+                        addTerm(solver, indices, coefficients, aBottomName(stage - 1, b, i), -1.0);
+                    } else {
+                        constant = addFixedLinearRuleExpression(solver,
+                                                                indices,
+                                                                coefficients,
+                                                                decisionRule,
+                                                                stage,
+                                                                numberOfItems,
+                                                                b,
+                                                                i,
+                                                                1.0);
+                    }
+
+                    solver.AddIndicatorConstraint(
+                        "dr_one_" + std::to_string(stage) + "_" +
+                            std::to_string(b) + "_" + std::to_string(i),
+                        assignmentIndex,
+                        0,
+                        indices,
+                        coefficients,
+                        'L',
+                        -constant);
+                }
+
+                /*
+                 * a = 0 => rule expression >= epsilon.
+                 */
+                {
+                    std::vector<int> indices;
+                    std::vector<double> coefficients;
+                    double constant = 0.0;
+
+                    if (usePiecewiseRule) {
+                        addTerm(solver, indices, coefficients, aTopName(stage - 1, b, i), 1.0);
+                        addTerm(solver, indices, coefficients, aBottomName(stage - 1, b, i), -1.0);
+                    } else {
+                        constant = addFixedLinearRuleExpression(solver,
+                                                                indices,
+                                                                coefficients,
+                                                                decisionRule,
+                                                                stage,
+                                                                numberOfItems,
+                                                                b,
+                                                                i,
+                                                                1.0);
+                    }
+
+                    solver.AddIndicatorConstraint(
+                        "dr_zero_" + std::to_string(stage) + "_" +
+                            std::to_string(b) + "_" + std::to_string(i),
+                        assignmentIndex,
+                        1,
+                        indices,
+                        coefficients,
+                        'G',
+                        kDecisionRuleEpsilon - constant);
+                }
+            }
+        }
+    }
+
+    if (!usePiecewiseRule) {
+        return;
+    }
+
+    /*
+     * Piecewise max representation for P > 1.
+     */
+    for (int stage = 1; stage < numberOfStages; ++stage) {
+        for (int b = 0; b < numberOfBars; ++b) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                for (int p = 0; p < numberOfPieces; ++p) {
+                    {
+                        std::vector<int> indices;
+                        std::vector<double> coefficients;
+
+                        addTerm(solver, indices, coefficients, aTopName(stage - 1, b, i), 1.0);
+                        const double constant =
+                            addNegativeFixedPieceExpression(solver,
+                                                            indices,
+                                                            coefficients,
+                                                            decisionRule,
+                                                            stage,
+                                                            numberOfItems,
+                                                            b,
+                                                            i,
+                                                            p,
+                                                            true);
+
+                        solver.AddLinearConstraint(
+                            "top_max_lower_" + std::to_string(stage) + "_" +
+                                std::to_string(b) + "_" + std::to_string(i) + "_" +
+                                std::to_string(p),
+                            indices,
+                            coefficients,
+                            'G',
+                            constant);
+                    }
+
+                    {
+                        std::vector<int> indices;
+                        std::vector<double> coefficients;
+
+                        addTerm(solver, indices, coefficients, aBottomName(stage - 1, b, i), 1.0);
+                        const double constant =
+                            addNegativeFixedPieceExpression(solver,
+                                                            indices,
+                                                            coefficients,
+                                                            decisionRule,
+                                                            stage,
+                                                            numberOfItems,
+                                                            b,
+                                                            i,
+                                                            p,
+                                                            false);
+
+                        solver.AddLinearConstraint(
+                            "bottom_max_lower_" + std::to_string(stage) + "_" +
+                                std::to_string(b) + "_" + std::to_string(i) + "_" +
+                                std::to_string(p),
+                            indices,
+                            coefficients,
+                            'G',
+                            constant);
+                    }
+
+                    {
+                        std::vector<int> indices;
+                        std::vector<double> coefficients;
+
+                        addTerm(solver, indices, coefficients, aTopName(stage - 1, b, i), 1.0);
+                        const double constant =
+                            addNegativeFixedPieceExpression(solver,
+                                                            indices,
+                                                            coefficients,
+                                                            decisionRule,
+                                                            stage,
+                                                            numberOfItems,
+                                                            b,
+                                                            i,
+                                                            p,
+                                                            true);
+
+                        solver.AddIndicatorConstraint(
+                            "top_max_upper_" + std::to_string(stage) + "_" +
+                                std::to_string(b) + "_" + std::to_string(i) + "_" +
+                                std::to_string(p),
+                            solver.RequireVariableIndex(zTopName(stage - 1, b, i, p)),
+                            0,
+                            indices,
+                            coefficients,
+                            'L',
+                            constant);
+                    }
+
+                    {
+                        std::vector<int> indices;
+                        std::vector<double> coefficients;
+
+                        addTerm(solver, indices, coefficients, aBottomName(stage - 1, b, i), 1.0);
+                        const double constant =
+                            addNegativeFixedPieceExpression(solver,
+                                                            indices,
+                                                            coefficients,
+                                                            decisionRule,
+                                                            stage,
+                                                            numberOfItems,
+                                                            b,
+                                                            i,
+                                                            p,
+                                                            false);
+
+                        solver.AddIndicatorConstraint(
+                            "bottom_max_upper_" + std::to_string(stage) + "_" +
+                                std::to_string(b) + "_" + std::to_string(i) + "_" +
+                                std::to_string(p),
+                            solver.RequireVariableIndex(zBottomName(stage - 1, b, i, p)),
+                            0,
+                            indices,
+                            coefficients,
+                            'L',
+                            constant);
+                    }
+                }
+
+                {
+                    std::vector<int> indices;
+                    std::vector<double> coefficients;
+
+                    for (int p = 0; p < numberOfPieces; ++p) {
+                        addTerm(solver, indices, coefficients, zTopName(stage - 1, b, i, p), 1.0);
+                    }
+
+                    solver.AddLinearConstraint(
+                        "select_top_piece_" + std::to_string(stage) + "_" +
+                            std::to_string(b) + "_" + std::to_string(i),
+                        indices,
+                        coefficients,
+                        'E',
+                        1.0);
+                }
+
+                {
+                    std::vector<int> indices;
+                    std::vector<double> coefficients;
+
+                    for (int p = 0; p < numberOfPieces; ++p) {
+                        addTerm(solver, indices, coefficients, zBottomName(stage - 1, b, i, p), 1.0);
+                    }
+
+                    solver.AddLinearConstraint(
+                        "select_bottom_piece_" + std::to_string(stage) + "_" +
+                            std::to_string(b) + "_" + std::to_string(i),
+                        indices,
+                        coefficients,
+                        'E',
+                        1.0);
+                }
+            }
+        }
+    }
+}
+
+void addScenarioCompositionConstraints(InstanceWriter& writer, CplexSolver& solver) {
+    const int numberOfStages = writer.getNumberOfStages();
+    const int numberOfItems = writer.getNumberOfItems();
+
+    for (int stage = 1; stage < numberOfStages; ++stage) {
+        std::vector<int> indices;
+        std::vector<double> coefficients;
+
+        for (int i = 0; i < numberOfItems; ++i) {
+            addTerm(solver, indices, coefficients, zName(stage, i), 1.0);
+        }
+
+        solver.AddLinearConstraint("one_item_per_stage_" + std::to_string(stage),
+                                   indices,
+                                   coefficients,
+                                   'E',
+                                   1.0);
+    }
+
+    for (int i = 0; i < numberOfItems; ++i) {
+        std::vector<int> indices;
+        std::vector<double> coefficients;
+
+        for (int stage = 1; stage < numberOfStages; ++stage) {
+            addTerm(solver, indices, coefficients, zName(stage, i), 1.0);
+        }
+
+        solver.AddLinearConstraint("item_count_" + std::to_string(i),
+                                   indices,
+                                   coefficients,
+                                   'E',
+                                   writer.getPartition()[i]);
+    }
+}
+
+void createCommon12bVariables(InstanceWriter& writer,
+                              CplexSolver& solver) {
+    const bool usePiecewiseRule = (writer.getNumberOfPieces() > 1);
+    const int numberOfStages = writer.getNumberOfStages();
+    const int numberOfBars = writer.getNumberOfBars();
+    const int numberOfItems = writer.getNumberOfItems();
+    const int numberOfPieces = writer.getNumberOfPieces();
+
+    for (int b = 0; b < numberOfBars; ++b) {
+        solver.AddBinaryVariable(aiName(b));
+    }
+
+    for (int stage = 1; stage < numberOfStages; ++stage) {
+        for (int b = 0; b < numberOfBars; ++b) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                solver.AddBinaryVariable(aName(stage - 1, b, i));
+            }
+        }
+    }
+
+    for (int stage = 1; stage < numberOfStages; ++stage) {
+        for (int i = 0; i < numberOfItems; ++i) {
+            solver.AddBinaryVariable(zName(stage, i));
+        }
+    }
+
+    for (int b = 0; b < numberOfBars; ++b) {
+        solver.AddBinaryVariable(fName(b));
+        solver.AddContinuousVariable(rName(b), 0.0, writer.getMinimumRest());
+        solver.AddBinaryVariable(nrName(b));
+    }
+
+    for (int stage = 1; stage < numberOfStages; ++stage) {
+        for (int b = 0; b < numberOfBars; ++b) {
+            solver.AddBinaryVariable(wName(stage - 1, b));
+        }
+    }
+
+    if (usePiecewiseRule) {
+        for (int stage = 1; stage < numberOfStages; ++stage) {
+            for (int b = 0; b < numberOfBars; ++b) {
+                for (int i = 0; i < numberOfItems; ++i) {
+                    solver.AddContinuousVariable(aTopName(stage - 1, b, i), -1000.0, 1000.0);
+                    solver.AddContinuousVariable(aBottomName(stage - 1, b, i), -1000.0, 1000.0);
+
+                    for (int p = 0; p < numberOfPieces; ++p) {
+                        solver.AddBinaryVariable(zTopName(stage - 1, b, i, p));
+                        solver.AddBinaryVariable(zBottomName(stage - 1, b, i, p));
+                    }
+                }
+            }
+        }
+    }
+}
+
+void fixInitialBar(InstanceWriter& writer,
+                   CplexSolver& solver,
+                   const DR_Holder& decisionRule) {
+    const int numberOfBars = writer.getNumberOfBars();
+
+    for (int b = 0; b < numberOfBars; ++b) {
+        std::vector<int> indices;
+        std::vector<double> coefficients;
+
+        addTerm(solver, indices, coefficients, aiName(b), 1.0);
+
+        solver.AddLinearConstraint("fix_initial_bar_" + std::to_string(b),
+                                   indices,
+                                   coefficients,
+                                   'E',
+                                   (b == decisionRule.FirstStageBar) ? 1.0 : 0.0);
+    }
+}
+
+void setTargetObjective(InstanceWriter& writer,
+                        CplexSolver& solver,
+                        const DecisionRuleSeparationTarget& target) {
+    const int numberOfStages = writer.getNumberOfStages();
+    const int numberOfItems = writer.getNumberOfItems();
+
+    switch (target.type) {
+    case DecisionRuleSeparationTarget::Type::UsedBarLink:
+        /*
+         * Master row:
+         *   ai_b + sum a_{t,b,i} - T f_b <= 0
+         */
+        setObj(solver, aiName(target.bar), 1.0);
+        for (int stage = 1; stage < numberOfStages; ++stage) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                setObj(solver, aName(stage - 1, target.bar, i), 1.0);
+            }
+        }
+        setObj(solver, fName(target.bar), -numberOfStages);
+        break;
+
+    case DecisionRuleSeparationTarget::Type::CapacityUpper:
+        /*
+         * Master row:
+         *   used_length + r_b - bar_size_b <= 0
+         */
+        setObj(solver, aiName(target.bar), writer.getInitialLength());
+        for (int stage = 1; stage < numberOfStages; ++stage) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                setObj(solver, aName(stage - 1, target.bar, i), writer.getItemLength(i));
+            }
+        }
+        setObj(solver, rName(target.bar), 1.0);
+        addObjectiveConstant(solver, "capacity_" + std::to_string(target.bar), -writer.getBarSize(target.bar));
+        break;
+
+    case DecisionRuleSeparationTarget::Type::RestLower:
+        /*
+         * Master row:
+         *   used_length + r_b + bar_size_b nr_b >= bar_size_b
+         *
+         * Violation:
+         *   bar_size_b - used_length - r_b - bar_size_b nr_b
+         */
+        setObj(solver, aiName(target.bar), -writer.getInitialLength());
+        for (int stage = 1; stage < numberOfStages; ++stage) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                setObj(solver, aName(stage - 1, target.bar, i), -writer.getItemLength(i));
+            }
+        }
+        setObj(solver, rName(target.bar), -1.0);
+        setObj(solver, nrName(target.bar), -writer.getBarSize(target.bar));
+        addObjectiveConstant(solver, "rest_lower_" + std::to_string(target.bar), writer.getBarSize(target.bar));
+        break;
+
+    case DecisionRuleSeparationTarget::Type::RestUpper:
+        /*
+         * Master row:
+         *   used_length + minimum_rest nr_b - bar_size_b <= 0
+         */
+        setObj(solver, aiName(target.bar), writer.getInitialLength());
+        for (int stage = 1; stage < numberOfStages; ++stage) {
+            for (int i = 0; i < numberOfItems; ++i) {
+                setObj(solver, aName(stage - 1, target.bar, i), writer.getItemLength(i));
+            }
+        }
+        setObj(solver, nrName(target.bar), writer.getMinimumRest());
+        addObjectiveConstant(solver, "capacity_" + std::to_string(target.bar), -writer.getBarSize(target.bar));
+        break;
+
+    case DecisionRuleSeparationTarget::Type::RestCap:
+        /*
+         * Master row:
+         *   r_b + minimum_rest nr_b - minimum_rest <= 0
+         */
+        setObj(solver, rName(target.bar), 1.0);
+        setObj(solver, nrName(target.bar), writer.getMinimumRest());
+        addObjectiveConstant(solver, "rest_cap_" + std::to_string(target.bar), -writer.getMinimumRest());
+        break;
+
+    case DecisionRuleSeparationTarget::Type::AssignUpper:
+        /*
+         * Master row:
+         *   sum_b a_{t,b,i} - z_{t,i} <= 0
+         */
+        for (int b = 0; b < writer.getNumberOfBars(); ++b) {
+            setObj(solver, aName(target.stage - 1, b, target.item), 1.0);
+        }
+        setObj(solver, zName(target.stage, target.item), -1.0);
+        break;
+
+    case DecisionRuleSeparationTarget::Type::AssignLower:
+        /*
+         * Master row:
+         *   z_{t,i} - sum_b a_{t,b,i} <= 0
+         */
+        setObj(solver, zName(target.stage, target.item), 1.0);
+        for (int b = 0; b < writer.getNumberOfBars(); ++b) {
+            setObj(solver, aName(target.stage - 1, b, target.item), -1.0);
+        }
+        break;
+
+    case DecisionRuleSeparationTarget::Type::Switching:
+        /*
+         * Master row:
+         *   sum_i a_{t,b,i} - previous_use_{t-1,b} - w_{t,b} <= 0
+         */
+        for (int i = 0; i < numberOfItems; ++i) {
+            setObj(solver, aName(target.stage - 1, target.bar, i), 1.0);
+        }
+
+        if (target.stage == 1) {
+            setObj(solver, aiName(target.bar), -1.0);
+        } else {
+            for (int i = 0; i < numberOfItems; ++i) {
+                setObj(solver, aName(target.stage - 2, target.bar, i), -1.0);
+            }
+        }
+
+        setObj(solver, wName(target.stage - 1, target.bar), -1.0);
+        break;
+    }
+}
+
+} // namespace
+
+/*
+ * Build the list of master constraints that have to be checked by the old 12b
+ * separation model.
+ *
+ * Unlike the old implementation, this no longer returns LP-format strings.
+ * It returns structured targets, so the model can be built internally.
+ */
+std::vector<DecisionRuleSeparationTarget>
+InstanceWriter::PrepareDecisionRuleConstraintSeparationTargets(
+    const DR_Holder& decisionRule)
+{
+    (void)decisionRule;
+
+    std::vector<DecisionRuleSeparationTarget> targets;
+
+    for (int b = 0; b < NumberOfBars; ++b) {
+        targets.push_back(DecisionRuleSeparationTarget{
+            DecisionRuleSeparationTarget::Type::UsedBarLink, 0, b, 0});
+        targets.push_back(DecisionRuleSeparationTarget{
+            DecisionRuleSeparationTarget::Type::CapacityUpper, 0, b, 0});
+        targets.push_back(DecisionRuleSeparationTarget{
+            DecisionRuleSeparationTarget::Type::RestLower, 0, b, 0});
+        targets.push_back(DecisionRuleSeparationTarget{
+            DecisionRuleSeparationTarget::Type::RestUpper, 0, b, 0});
+        targets.push_back(DecisionRuleSeparationTarget{
+            DecisionRuleSeparationTarget::Type::RestCap, 0, b, 0});
+    }
+
+    for (int stage = 1; stage < NumberOfStages; ++stage) {
+        for (int i = 0; i < NumberOfItems; ++i) {
+            targets.push_back(DecisionRuleSeparationTarget{
+                DecisionRuleSeparationTarget::Type::AssignUpper, stage, 0, i});
+            targets.push_back(DecisionRuleSeparationTarget{
+                DecisionRuleSeparationTarget::Type::AssignLower, stage, 0, i});
+        }
+
+        for (int b = 0; b < NumberOfBars; ++b) {
+            targets.push_back(DecisionRuleSeparationTarget{
+                DecisionRuleSeparationTarget::Type::Switching, stage, b, 0});
+        }
+    }
+
+    return targets;
+}
+
+/*
+ * Build the old 12b separation problem directly in CPLEX.
+ *
+ * This model maximizes the violation of one structured master constraint
+ * target. If the optimal value is positive, ExtractScenario(...) can recover
+ * the item sequence from the selected z variables.
+ */
+void InstanceWriter::BuildDecisionRuleConstraintSeparationModel(
+    CplexSolver& solver,
+    const DR_Holder& decisionRule,
+    const DecisionRuleSeparationTarget& target,
+    int targetIndex)
+{
+    solver.CreateProblem(BaseName + "_DR12b_" + std::to_string(targetIndex));
+    solver.SetMaximize();
+
+    createCommon12bVariables(*this, solver);
+    fixInitialBar(*this, solver, decisionRule);
+    addFixedDecisionRuleConstraints(*this, solver, decisionRule);
+    addScenarioCompositionConstraints(*this, solver);
+
+    setTargetObjective(*this, solver, target);
+}
+
+/*
+ * Compatibility guards.
+ */
+std::vector<std::string> InstanceWriter::prepareLines()
+{
+    throw std::runtime_error(
+        "prepareLines() is deprecated. Use PrepareDecisionRuleConstraintSeparationTargets(...) instead.");
+}
+
+void InstanceWriter::writeDR_12b(DR_Holder, std::string, int)
+{
+    throw std::runtime_error(
+        "writeDR_12b() is deprecated. Use BuildDecisionRuleConstraintSeparationModel(...) instead.");
+}
