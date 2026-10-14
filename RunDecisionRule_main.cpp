@@ -31,10 +31,12 @@ double toDouble(const char* value, const char* name) {
 
 void usage(const char* program) {
     std::cerr
-        << "Usage: " << program << " instance.raw NumP ConsStages [output_base] [timelimit_seconds]\n\n"
+        << "Usage: " << program
+        << " instance.raw NumP ConsStages [timelimit_seconds] \n\n" //[output_base]
         << "Reads an existing .raw/.info file and solves the decision-rule model with CPLEX.\n"
-        << "The default global wall-clock timelimit is 3600 seconds;\n"
+        << "The default global wall-clock time limit is 3600 seconds;\n"
         << "pass 0 as timelimit_seconds to disable it.\n";
+        //<< "output_base is optional and only needed for naming debug/output artifacts.\n";
 }
 }
 
@@ -50,9 +52,8 @@ int main(int argc, char* argv[]) {
         const std::string infoFile = argv[1];
         const int numPieces = toInt(argv[2], "NumP");
         const int consideredStages = toInt(argv[3], "ConsStages");
-        const std::string outputBase = (argc >= 5) ? argv[4] : "";
-        const double globalTimeLimit =
-            (argc == 6) ? toDouble(argv[5], "timelimit_seconds") : 3600.0;
+        const double globalTimeLimit = (argc >= 5) ? toDouble(argv[4], "timelimit_seconds") : 3600.0;
+        const std::string outputBase = (argc == 6) ? argv[5] : "";
 
         InstanceWriter masterBuilder =
             InstanceWriter::FromInfoFile(infoFile, outputBase, numPieces, consideredStages);

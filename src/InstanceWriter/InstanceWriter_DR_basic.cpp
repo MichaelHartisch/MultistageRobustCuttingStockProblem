@@ -143,7 +143,7 @@ void InstanceWriter::BuildInitialDecisionRuleMaster(CplexSolver& solver, double 
     for (int t = 0; t < NumberOfStages - 1; ++t) {
         for (const std::string& scenarioPrefix : FullTree.SubScenarios[t]) {
             for (int b = 0; b < NumberOfBars; ++b) {
-                solver.AddBinaryVariable(wName(scenarioPrefix, b));
+                solver.AddContinuousVariable(wName(scenarioPrefix, b),0.0,1.0);
             }
         }
     }
