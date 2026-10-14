@@ -95,7 +95,7 @@ int main(int argc, char* argv[]) {
         writer.Initialize();
         writer.CreateDataSheet();
 
-        std::cerr << "Wrote " << base << ".raw\n";
+//        std::cerr << "Wrote " << base << ".raw\n";
         return 0;
     }
 

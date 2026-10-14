@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        std::cerr << "Wrote selected model files for " << writer.getBaseName() << "\n";
+//        std::cerr << "Wrote selected model files for " << writer.getBaseName() << "\n";
     } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << "\n";
         usage(argv[0]);

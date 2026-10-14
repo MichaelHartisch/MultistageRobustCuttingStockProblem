@@ -39,7 +39,7 @@ private:
     int NumberOfBars;   // NumberOfBins
     int ConsideredStages;
     int P;
-    bool Debug_Print;
+    static bool Debug_Print=false;
     std::string BaseName;
     double MinimumRest;
     double BarChangeCost;

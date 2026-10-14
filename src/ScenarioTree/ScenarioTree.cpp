@@ -11,7 +11,6 @@ Tree::Tree(std::vector<int> SuccessorsInEachStage): RootNode(SuccessorsInEachSta
 	for (std::size_t i = 0; i < SuccessorsInEachStage.size(); ++i)	
 		SuccessorsPerStage.push_back(SuccessorsInEachStage[i]);
 	this->Depth=SuccessorsPerStage.size()-1;
-	std::cerr <<"Depth of Tree is " << this->Depth << std::endl;
 }
 int Tree::BuildEntireTree(	std::vector< int >  Partition){
 	CurrentTree.clear();
