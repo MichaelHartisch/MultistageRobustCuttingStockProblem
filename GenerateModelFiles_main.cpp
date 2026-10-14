@@ -7,7 +7,7 @@
 
 namespace {
 struct ModelSelection {
-    bool qip = true;
+    bool qlp = true;
     bool ro = true;
     bool ro_rc = true;
     bool mip = true;
@@ -21,7 +21,7 @@ void usage(const char* program) {
         << "By default, all supported model files are created. Use --no-* flags to skip\n"
         << "large files that are not needed for a particular experiment.\n\n"
         << "Options:\n"
-        << "  --no-qip       Do not create the QIP model file.\n"
+        << "  --no-qlp       Do not create the QIP model file.\n"
         << "  --no-ro        Do not create the RO model file.\n"
         << "  --no-ro-rc     Do not create the RO_RC model file.\n"
         << "  --no-mip       Do not create the MIP model file.\n"
@@ -37,8 +37,8 @@ bool isOption(const std::string& value) {
 }
 
 void applyOption(const std::string& option, ModelSelection& selection) {
-    if (option == "--no-qip") {
-        selection.qip = false;
+    if (option == "--no-qlp") {
+        selection.qlp = false;
     } else if (option == "--no-ro") {
         selection.ro = false;
     } else if (option == "--no-ro-rc") {
@@ -85,7 +85,7 @@ int main(int argc, char* argv[]) {
 
         bool wroteAny = false;
 
-        if (selection.qip) {
+        if (selection.qlp) {
             writer.writeQIP();
             wroteAny = true;
         }

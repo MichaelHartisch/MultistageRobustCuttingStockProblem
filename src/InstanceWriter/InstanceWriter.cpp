@@ -172,7 +172,6 @@ InstanceWriter InstanceWriter::FromInfoFile(const std::string& InfoFile, const s
 
 
 void InstanceWriter::Initialize(){
-	Debug_Print=true;
 	if (Debug_Print){
 		//cout <<"Number of Stages: " <<NumberOfStages<< "\n";
 		//cout <<"Number of Bars: " <<NumberOfBars << "\n";
