@@ -34,7 +34,6 @@ set(INSTANCE_WRITER_SOURCES
     src/InstanceWriter/InstanceWriter.cpp
     src/InstanceWriter/InstanceWriter_Heuristic2.cpp
     src/InstanceWriter/InstanceWriter_MIP.cpp
-    src/InstanceWriter/InstanceWriter_MIPasQLP.cpp
     src/InstanceWriter/InstanceWriter_QIP.cpp
     src/InstanceWriter/InstanceWriter_RC.cpp
     src/InstanceWriter/InstanceWriter_RO.cpp

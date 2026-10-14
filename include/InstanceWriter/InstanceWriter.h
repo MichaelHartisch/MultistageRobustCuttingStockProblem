@@ -77,7 +77,6 @@ public:
     void writeRO_RC();
     void writeRO_RC_alt();
     void writeMIP();
-    void writeMIPasQLP();
     void writeHeuristic2();
     void writeRC();
     void CreateScenarios();
