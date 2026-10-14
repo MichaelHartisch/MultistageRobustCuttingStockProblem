@@ -54,8 +54,8 @@ int Tree::BuildEntireTree(	std::vector< int >  Partition){
     } while(std::next_permutation(s.begin(), s.end()));
 /*	for(int t=0;t<Depth;t++){
     	std::cerr <<"There are " <<SubScenarios[t].size() << " SubScenarios of length "<<(t+1) <<std::endl;
-    }*/
-    std::cerr <<"Number of contained Scenarios is " << ContainedScenarios.size()<<std::endl;
+    }
+    std::cerr <<"Number of contained Scenarios is " << ContainedScenarios.size()<<std::endl;*/
     return ContainedScenarios.size();
 }
 
@@ -128,8 +128,8 @@ void Tree::InitializePartialTree(std::vector< int >  Partition){
     } 
 /*	for(int t=0;t<Depth;t++){
     	std::cerr <<"There are " <<SubScenarios[t].size() << " SubScenarios of length "<<(t+1) <<std::endl;
-    }*/
-    std::cerr <<"Number of contained Scenarios is " << ContainedScenarios.size()<<std::endl;
+    }
+    std::cerr <<"Number of contained Scenarios is " << ContainedScenarios.size()<<std::endl;*/
 }
 
 int Tree::ExpandTree( std::vector< std::string >  AdditionalScenarios ){
@@ -160,8 +160,8 @@ int Tree::ExpandTree( std::vector< std::string >  AdditionalScenarios ){
     	std::cerr <<"Expanded Scenario Tree: Added " << Added << " of " << AdditionalScenarios.size() <<" scenarios"<<std::endl;
 /*		for(int t=0;t<Depth;t++){
 	    	std::cerr <<"There are " <<SubScenarios[t].size() << " SubScenarios of length "<<(t+1) <<std::endl;
-	    }*/
-	    std::cerr <<"Number of contained Scenarios is " << ContainedScenarios.size()<<std::endl;
+	    }
+	    std::cerr <<"Number of contained Scenarios is " << ContainedScenarios.size()<<std::endl;*/
 	}
     return Added;
 }
