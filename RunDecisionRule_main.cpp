@@ -55,6 +55,47 @@ int main(int argc, char* argv[]) {
         const double globalTimeLimit = (argc >= 5) ? toDouble(argv[4], "timelimit_seconds") : 3600.0;
         const std::string outputBase = (argc == 6) ? argv[5] : "";
 
+        // Include instance loading, tree construction and model construction
+        // in the experiment-wide wall-clock time limit.
+        const auto start = std::chrono::steady_clock::now();
+        auto elapsedSeconds = [&]() {
+            return std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - start).count();
+        };
+
+        bool timeLimitReached = false;
+        auto withinDeadline = [&]() {
+            if (globalTimeLimit > 0.0 && elapsedSeconds() >= globalTimeLimit) {
+                if (!timeLimitReached) {
+                    std::cerr << "ABORT: TIMELIMIT REACHED\n";
+                }
+                timeLimitReached = true;
+                return false;
+            }
+            return true;
+        };
+
+        struct DeadlineExceeded {};
+        auto checkDeadline = [&]() {
+            if (!withinDeadline()) throw DeadlineExceeded{};
+        };
+
+        auto applyRemainingTimeLimit = [&](CplexSolver& targetSolver) {
+            if (!withinDeadline()) {
+                return false;
+            }
+            // A limit of zero deliberately disables the experiment deadline.
+            const double remaining = (globalTimeLimit <= 0.0)
+                                         ? 0.0
+                                         : globalTimeLimit - elapsedSeconds();
+            if (globalTimeLimit > 0.0 && remaining <= 0.0) {
+                timeLimitReached = true;
+                return false;
+            }
+            targetSolver.SetTimeLimit(remaining);
+            return true;
+        };
+
         InstanceWriter masterBuilder =
             InstanceWriter::FromInfoFile(infoFile, outputBase, numPieces, consideredStages);
 
@@ -70,58 +111,30 @@ int main(int argc, char* argv[]) {
         CplexSolver checkSolver(nullptr, masterBuilder.STree.SuccessorsPerStage);
 
         /*
-         * The full tree is used by the separation models. The partial tree is
-         * the scenario set currently represented in the master problem.
+         * Initialize a small scenario sample.  The master and its scenario-
+         * indexed variables and rows grow only as separation finds new
+         * scenarios.  Neither initialization routine enumerates the full tree.
          */
-        masterBuilder.FullTree.BuildEntireTree(masterBuilder.getPartition());
-        masterBuilder.STree.InitializePartialTree(masterBuilder.getPartition());
+        if (withinDeadline()) {
+            masterBuilder.STree.InitializePartialTree(masterBuilder.getPartition());
+        }
 
-        /*
-         * New internal model-builder routine.
-         *
-         * This replaces:
-         *     writeDR_basic();
-         *     ReadProblem("<base>_DR_basic.lp");
-         *
-         * The routine should create the initial DR master directly in mainSolver.
-         */
-        masterBuilder.BuildInitialDecisionRuleMaster(mainSolver);
+        if (withinDeadline()) {
+            // Abort initial master construction cooperatively.  A partially
+            // constructed CPLEX model is never solved or certified.
+            try {
+                masterBuilder.BuildInitialDecisionRuleMaster(
+                    mainSolver, 0.0, checkDeadline);
+            } catch (const DeadlineExceeded&) {
+                // withinDeadline() has already marked the run as TIMELIMIT.
+            }
+        }
 
         decisionRule.NecessaryScenarios.clear();
-
-        auto start = std::chrono::high_resolution_clock::now();
-
         double currentBound = 0.0;
         int iterationCounter = 0;
-        bool timeLimitReached = false;
 
-        auto elapsedSeconds = [&]() {
-            const auto current = std::chrono::high_resolution_clock::now();
-            return std::chrono::duration<double>(current - start).count();
-        };
-
-        auto applyRemainingTimeLimit = [&](CplexSolver& targetSolver) {
-            if (globalTimeLimit <= 0.0) {
-                targetSolver.SetTimeLimit(0.0);
-                return true;
-            }
-
-            const double remaining = globalTimeLimit - elapsedSeconds();
-            if (remaining <= 0.0) {
-                std::cerr << "ABORT: TIMELIMIT REACHED\n";
-                timeLimitReached = true;
-                return false;
-            }
-
-            targetSolver.SetTimeLimit(remaining);
-            return true;
-        };
-
-        do {
-            if (!applyRemainingTimeLimit(mainSolver)) {
-                break;
-            }
-
+        while (withinDeadline()) {
             ++iterationCounter;
 
             /*
@@ -134,16 +147,33 @@ int main(int argc, char* argv[]) {
              */
             masterBuilder.STree.FilterNewScenarios(decisionRule.NecessaryScenarios);
             masterBuilder.STree.ExpandTree(decisionRule.NecessaryScenarios);
-
-            masterBuilder.AddDecisionRuleMasterRowsForNewScenarios(mainSolver, decisionRule);
+            try {
+                masterBuilder.AddDecisionRuleMasterRowsForNewScenarios(
+                    mainSolver, decisionRule, checkDeadline);
+            } catch (const DeadlineExceeded&) {
+                break;
+            }
 
             masterBuilder.STree.CleanTree(decisionRule.NecessaryScenarios);
             decisionRule.NecessaryScenarios.clear();
 
-            std::cerr << "Solve Main\n";
+            if (!withinDeadline()) {
+                break;
+            }
 
+            std::cerr << "Solve Main\n";
             mainSolver.UpdateBound(currentBound);
+            // Refresh the CPLEX limit AFTER expanding and updating the master.
+            if (!applyRemainingTimeLimit(mainSolver)) {
+                break;
+            }
             const double solvedMainObj = mainSolver.Solve(true);
+
+            if (mainSolver.IsTimeLimit() || !withinDeadline()) {
+                std::cerr << "Main DR solve reached the time limit.\n";
+                timeLimitReached = true;
+                break;
+            }
 
             if (mainSolver.IsInfeasible()) {
                 std::cerr << "Main DR problem is infeasible.\n";
@@ -151,14 +181,10 @@ int main(int argc, char* argv[]) {
                 break;
             }
 
-            if (!mainSolver.HasObjectiveValue()) {
-                if (mainSolver.IsTimeLimit()) {
-                    std::cerr << "Main DR solve stopped without objective due to time limit.\n";
-                    finalStatus = "TIMELIMIT";
-                } else {
-                    std::cerr << "Main DR solve stopped without objective.\n";
-                    finalStatus = "ERROR";
-                }
+            if (!mainSolver.IsOptimal() || !mainSolver.HasObjectiveValue()) {
+                std::cerr << "Main DR solve did not establish optimality (CPLEX status "
+                          << mainSolver.GetLastSolutionStatus() << ").\n";
+                finalStatus = "ERROR";
                 break;
             }
 
@@ -170,6 +196,10 @@ int main(int argc, char* argv[]) {
             std::cerr << "BOUND_MAIN: " << mainBestBound << "\n";
 
             mainSolver.ExtractDR(decisionRule);
+
+            if (!withinDeadline()) {
+                break;
+            }
 
             /*
              * Objective/worst-case separation.
@@ -189,6 +219,18 @@ int main(int argc, char* argv[]) {
             }
 
             const double obj12a = checkSolver.Solve();
+
+            if (checkSolver.IsTimeLimit() || !withinDeadline()) {
+                std::cerr << "12a separation reached the time limit.\n";
+                timeLimitReached = true;
+                break;
+            }
+            if (!checkSolver.IsOptimal() || !checkSolver.HasObjectiveValue()) {
+                std::cerr << "12a separation did not establish optimality (CPLEX status "
+                          << checkSolver.GetLastSolutionStatus() << ").\n";
+                finalStatus = "ERROR";
+                break;
+            }
 
             if (obj12a > currentBound && std::fabs(obj12a - currentBound) > 0.00001) {
                 if (!checkSolver.ExtractScenario(decisionRule)) {
@@ -210,9 +252,16 @@ int main(int argc, char* argv[]) {
             const auto separationTargets =
                 separationBuilder.PrepareDecisionRuleConstraintSeparationTargets(decisionRule);
 
+            if (!withinDeadline()) {
+                break;
+            }
+
             std::cerr << "Solve 12bs\n";
 
             for (std::size_t i = 0; i < separationTargets.size(); ++i) {
+                if (!withinDeadline()) {
+                    break;
+                }
                 separationBuilder.BuildDecisionRuleConstraintSeparationModel(
                     checkSolver,
                     decisionRule,
@@ -225,27 +274,43 @@ int main(int argc, char* argv[]) {
 
                 const double obj12b = checkSolver.Solve();
 
+                if (checkSolver.IsTimeLimit() || !withinDeadline()) {
+                    std::cerr << "12b separation reached the time limit.\n";
+                    timeLimitReached = true;
+                    break;
+                }
+                if (!checkSolver.IsOptimal() || !checkSolver.HasObjectiveValue()) {
+                    std::cerr << "12b separation did not establish optimality (CPLEX status "
+                              << checkSolver.GetLastSolutionStatus() << ").\n";
+                    finalStatus = "ERROR";
+                    break;
+                }
+
                 if (obj12b > 0.0 && std::fabs(obj12b) > 0.00001) {
                     checkSolver.ExtractScenario(decisionRule);
                 }
             }
 
-            if (timeLimitReached) {
+            if (timeLimitReached || finalStatus != "FINISHED") {
                 break;
             }
 
             masterBuilder.STree.FilterNewScenarios(decisionRule.NecessaryScenarios);
+            if (decisionRule.NecessaryScenarios.empty()) {
+                break;
+            }
+        }
 
-        } while (!timeLimitReached && !decisionRule.NecessaryScenarios.empty());
-
-        const auto end = std::chrono::high_resolution_clock::now();
-        const std::chrono::duration<double> elapsed = end - start;
+        // A complete iteration is not a certificate if the global deadline
+        // expired during the last bookkeeping step.
+        withinDeadline();
+        const double elapsed = elapsedSeconds();
 
         if (timeLimitReached) {
             finalStatus = "TIMELIMIT";
         }
 
-        std::cout << "TIME: " << elapsed.count() << '\n';
+        std::cout << "TIME: " << elapsed << '\n';
 
         if (finalStatus == "FINISHED") {
             std::cout << "OBJ: " << currentBound << "\n";
@@ -253,7 +318,8 @@ int main(int argc, char* argv[]) {
             std::cout << "OBJ: " << "\n";
         }
 
-        std::cout << "SCENARIOS: " << masterBuilder.STree.SubScenarios.back().size() << "\n";
+        std::cout << "SCENARIOS: " << (masterBuilder.STree.SubScenarios.empty()
+                        ? 0 : masterBuilder.STree.SubScenarios.back().size()) << "\n";
         std::cout << "ITERATIONS: " << iterationCounter << "\n";
         std::cout << "STATUS: " << finalStatus << "\n";
 

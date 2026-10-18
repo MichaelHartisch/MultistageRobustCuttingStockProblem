@@ -153,6 +153,10 @@ CplexSolver::CplexSolver(char** /*argv*/, std::vector<int> /*SuccessorsInEachSta
    status = CPXXsetintparam(env, CPX_PARAM_THREADS, NUM_THREADS);
    CheckStatus(status, "Failed to set CPLEX thread count");
 
+   // The experiment-wide deadline is measured in wall-clock seconds.
+   status = CPXXsetintparam(env, CPX_PARAM_CLOCKTYPE, 2);
+   CheckStatus(status, "Failed to select CPLEX wall-clock time");
+
    status = CPXXsetintparam(env, CPXPARAM_ScreenOutput, CPX_OFF);
    CheckStatus(status, "Failure to turn off CPLEX screen output");
 }
@@ -227,7 +231,10 @@ int CplexSolver::AddVariable(const std::string& name,
 {
    EnsureProblemExists("AddVariable");
 
-   if (!name.empty() && FindVariableIndexByName(name) >= 0) {
+   // Every column created by AddVariable is already recorded in this map,
+   // and ReadProblem explicitly rebuilds it.  Avoid asking CPLEX to look up
+   // a not-yet-existing column for every newly created variable.
+   if (!name.empty() && variableIndexByName.find(name) != variableIndexByName.end()) {
       throw std::runtime_error("Variable already exists: " + name);
    }
 
@@ -887,6 +894,12 @@ bool CplexSolver::IsTimeLimit() const
    }
 #endif
    return solstat == 107 || solstat == 108;
+}
+
+bool CplexSolver::IsOptimal() const
+{
+   // Both statuses certify MIP optimality up to CPLEX's configured tolerances.
+   return solstat == CPXMIP_OPTIMAL || solstat == CPXMIP_OPTIMAL_TOL;
 }
 
 void CplexSolver::Clear()

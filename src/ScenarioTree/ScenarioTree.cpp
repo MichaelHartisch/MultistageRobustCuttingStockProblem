@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <random>
 #include <algorithm>
+#include <unordered_set>
 
 Tree::Tree(std::vector<int> SuccessorsInEachStage): RootNode(SuccessorsInEachStage[0],0), Rng(0)
 {
@@ -12,7 +13,8 @@ Tree::Tree(std::vector<int> SuccessorsInEachStage): RootNode(SuccessorsInEachSta
 		SuccessorsPerStage.push_back(SuccessorsInEachStage[i]);
 	this->Depth=SuccessorsPerStage.size()-1;
 }
-int Tree::BuildEntireTree(	std::vector< int >  Partition){
+int Tree::BuildEntireTree(	std::vector< int >  Partition,
+                           const std::function<void()>& checkDeadline){
 	CurrentTree.clear();
 	ContainedScenarios.clear();
 	CurrentTree.push_back(RootNode);
@@ -31,7 +33,13 @@ int Tree::BuildEntireTree(	std::vector< int >  Partition){
 		}
 	}
     std::sort(s.begin(), s.end());
+    std::size_t scenariosProcessed = 0;
     do {
+        // Allow the decision-rule runner to interrupt full-tree enumeration.
+        // Other callers retain the original behavior by omitting the callback.
+        if (checkDeadline && (scenariosProcessed++ % 1024 == 0)) {
+            checkDeadline();
+        }
     	int CurrentNode = 0; //RootNode
     	for(int t=0;t<Depth;t++){
     		//std::cerr <<"Current Successor is "<<ScenarioEncoding::decodeItem(s[t])<<std::endl;
@@ -82,32 +90,51 @@ void Tree::InitializePartialTree(std::vector< int >  Partition){
 	std::cerr <<"Start InitializePartialTree" << std::endl;
 	CurrentTree.clear();
 	CurrentTree.push_back(RootNode);
+    SubScenarios.assign(static_cast<std::size_t>(Depth), {});
+    SubScenariosToNode.assign(static_cast<std::size_t>(Depth), {});
 
-	std::string s = "";	
-	SubScenarios.clear();
-	SubScenariosToNode.clear();
-	for (int t=0;t<Depth;t++){
-		std::vector<std::string > EmptySet;
-		SubScenarios.push_back(EmptySet);
-		std::vector<int> EmptyNodeSet;
-		SubScenariosToNode.push_back(EmptyNodeSet);
-	}
-	for (std::size_t i = 0; i < Partition.size(); ++i){	
-		for (int p=0;p< Partition[i];p++){
-			s += ScenarioEncoding::encodeItem(static_cast<int>(i));
-		}
-	}
-	std::sort(s.begin(), s.end());
-	AllAvailableScenarios.clear();
-	ContainedScenarios.clear();
-    do {
-    	AllAvailableScenarios.push_back(s);
-    } while(std::next_permutation(s.begin(), s.end()));
-    	random_stringShuffle(AllAvailableScenarios);
+    // The uncertainty set consists of all distinct permutations of the item
+    // multiset in Partition.  Generating and shuffling that entire set would
+    // require factorial memory and time, even though only log2(N) scenarios
+    // enter the initial master.
+    if (std::any_of(Partition.begin(), Partition.end(),
+                    [](int count) { return count < 0; })) {
+        throw std::invalid_argument("Negative count in scenario partition");
+    }
+    const std::string baseScenario = ScenarioEncoding::encodePartition(Partition);
+    if (static_cast<int>(baseScenario.size()) != Depth) {
+        throw std::invalid_argument("Scenario partition length does not match tree depth");
+    }
 
-    std::vector<std::string>::const_iterator first = AllAvailableScenarios.begin();
-	std::vector<std::string>::const_iterator last = AllAvailableScenarios.begin() + (int)fmax(1,std::floor(std::log2(AllAvailableScenarios.size())));
-	ContainedScenarios.assign(first,last);
+    // N = Depth! / product_i Partition[i]!.  Work in logarithms to avoid
+    // integer overflow, and retain the original max(1, floor(log2(N))) size.
+    long double logNumberOfScenarios =
+        std::lgamma(static_cast<long double>(Depth) + 1.0L);
+    for (int count : Partition) {
+        logNumberOfScenarios -=
+            std::lgamma(static_cast<long double>(count) + 1.0L);
+    }
+    const long double log2NumberOfScenarios =
+        logNumberOfScenarios / std::log(2.0L);
+    const std::size_t initialScenarioCount = std::max<std::size_t>(
+        1, static_cast<std::size_t>(std::floor(log2NumberOfScenarios + 1e-12L)));
+
+    AllAvailableScenarios.clear(); // The full scenario list is no longer needed.
+    ContainedScenarios.clear();
+    ContainedScenarios.reserve(initialScenarioCount);
+    std::unordered_set<std::string> sampledScenarios;
+    sampledScenarios.reserve(initialScenarioCount);
+
+    // Shuffling the multiset samples distinct permutations uniformly: each
+    // distinct ordering corresponds to the same number of labelled shuffles.
+    // Reject repeated samples; k is logarithmic in N, so collisions are rare.
+    while (ContainedScenarios.size() < initialScenarioCount) {
+        std::string scenario = baseScenario;
+        std::shuffle(scenario.begin(), scenario.end(), Rng);
+        if (sampledScenarios.insert(scenario).second) {
+            ContainedScenarios.push_back(std::move(scenario));
+        }
+    }
    	for (std::size_t i = 0; i < ContainedScenarios.size(); ++i){	
    		std::string s = ContainedScenarios[i];
    		int CurrentNode = 0; //RootNode

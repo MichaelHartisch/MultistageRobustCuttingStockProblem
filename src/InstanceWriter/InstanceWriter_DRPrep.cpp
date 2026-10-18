@@ -190,15 +190,17 @@ void addPieceExpression(CplexSolver& solver,
  * call. This version adds the corresponding rows directly to the supplied
  * CplexSolver object.
  *
- * The function assumes that BuildInitialDecisionRuleMaster(...) has already
- * created all global variables and all scenario-indexed variables over the full
- * scenario tree. For P > 1, this function creates the scenario-specific
- * auxiliary max variables aT/aB/zT/zB when the corresponding node first enters
- * the partial tree.
+ * BuildInitialDecisionRuleMaster(...) creates only the global variables.
+ * This function creates scenario-indexed variables on demand for each newly
+ * added prefix or complete scenario, together with its objective epigraph and
+ * feasibility constraints.  Prefix variables are created only once even when
+ * different complete scenarios share a history.  For P > 1 it also creates
+ * the auxiliary max variables aT/aB/zT/zB when needed.
  */
 void InstanceWriter::AddDecisionRuleMasterRowsForNewScenarios(
     CplexSolver& solver,
-    const DR_Holder& decisionRule)
+    const DR_Holder& decisionRule,
+    const std::function<void()>& checkDeadline)
 {
     (void)decisionRule;
 
@@ -206,6 +208,49 @@ void InstanceWriter::AddDecisionRuleMasterRowsForNewScenarios(
 
     const bool usePiecewiseRule = (P > 1);
     const double INF = CPX_INFBOUND;
+
+    /*
+     * Variables for newly introduced scenario prefixes.  By constructing
+     * them here, we avoid generating any columns for unused branches of the
+     * full scenario tree.  All following constraints can refer to these
+     * variables even when a new scenario shares a prefix with an old one.
+     */
+    for (int stage = 1; stage < NumberOfStages; ++stage) {
+        const int level = stage - 1;
+        for (std::size_t s = 0; s < STree.SubScenarios[level].size(); ++s) {
+            if (checkDeadline) checkDeadline();
+            const int nodeIndex = STree.SubScenariosToNode[level][s];
+            if (!STree.CurrentTree[nodeIndex].IsNew) {
+                continue;
+            }
+
+            const std::string& prefix = STree.SubScenarios[level][s];
+            for (int b = 0; b < NumberOfBars; ++b) {
+                for (int i = 0; i < NumberOfItems; ++i) {
+                    solver.AddBinaryVariable(aName(prefix, b, i));
+                }
+                solver.AddContinuousVariable(wName(prefix, b), 0.0, 1.0);
+            }
+        }
+    }
+
+    /*
+     * Terminal cost variables are required only for new complete scenarios.
+     */
+    for (std::size_t s = 0; s < STree.SubScenarios.back().size(); ++s) {
+        if (checkDeadline) checkDeadline();
+        const int nodeIndex = STree.SubScenariosToNode.back()[s];
+        if (!STree.CurrentTree[nodeIndex].IsNew) {
+            continue;
+        }
+
+        const std::string& scenario = STree.SubScenarios.back()[s];
+        for (int b = 0; b < NumberOfBars; ++b) {
+            solver.AddContinuousVariable(rName(scenario, b), 0.0, MinimumRest);
+            solver.AddBinaryVariable(fName(scenario, b));
+            solver.AddBinaryVariable(nrName(scenario, b));
+        }
+    }
 
     /*
      * For P > 1, create the auxiliary variables associated with newly added
@@ -242,12 +287,39 @@ void InstanceWriter::AddDecisionRuleMasterRowsForNewScenarios(
      * Complete-scenario constraints.
      */
     for (std::size_t s = 0; s < STree.SubScenarios.back().size(); ++s) {
+        if (checkDeadline) checkDeadline();
         const int nodeIndex = STree.SubScenariosToNode.back()[s];
         if (!STree.CurrentTree[nodeIndex].IsNew) {
             continue;
         }
 
         const std::string& scenario = STree.SubScenarios.back()[s];
+
+        /*
+         * Cost(scenario) <= obj.  Include this row when the scenario enters
+         * the partial tree, rather than generating exponentially many rows
+         * and scenario-indexed columns in the initial master.
+         */
+        {
+            std::vector<int> indices;
+            std::vector<double> coefficients;
+            for (int b = 0; b < NumberOfBars; ++b) {
+                addTerm(solver, indices, coefficients, rName(scenario, b), CostPerUnit);
+                addTerm(solver, indices, coefficients, fName(scenario, b), CostPerBar);
+            }
+            for (int stage = 1; stage < NumberOfStages; ++stage) {
+                const std::string prefix = scenario.substr(0, static_cast<std::size_t>(stage));
+                for (int b = 0; b < NumberOfBars; ++b) {
+                    addTerm(solver, indices, coefficients, wName(prefix, b), BarChangeCost);
+                }
+            }
+            addTerm(solver, indices, coefficients, "obj", -1.0);
+            solver.AddLinearConstraint("obj_epigraph_" + scenario,
+                                       indices,
+                                       coefficients,
+                                       'L',
+                                       0.0);
+        }
 
         /*
          * If a bar is used, activate f.
@@ -441,6 +513,7 @@ void InstanceWriter::AddDecisionRuleMasterRowsForNewScenarios(
         const int level = stage - 1;
 
         for (std::size_t s = 0; s < STree.SubScenarios[level].size(); ++s) {
+            if (checkDeadline) checkDeadline();
             const int nodeIndex = STree.SubScenariosToNode[level][s];
             if (!STree.CurrentTree[nodeIndex].IsNew) {
                 continue;

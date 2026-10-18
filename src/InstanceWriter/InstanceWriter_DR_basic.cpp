@@ -76,19 +76,21 @@ std::string yBottomConstantName(int stageMinusOne, int bar, int item, int piece)
  *
  * The initial master contains:
  *   - the objective variable obj;
- *   - all variables that are needed globally or in the objective epigraph;
- *   - the objective epigraph constraints over the full scenario tree;
+ *   - the global decision-rule variables and first-stage assignment variables;
  *   - the initial-item assignment constraint.
  *
- * Scenario-dependent feasibility constraints are still added incrementally by
- * AddDecisionRuleMasterRowsForNewScenarios(...), which will replace the old
- * DR_prepare() routine.
+ * Scenario-indexed variables, objective epigraph constraints and feasibility
+ * constraints are created only for scenarios introduced into the partial tree,
+ * by AddDecisionRuleMasterRowsForNewScenarios(...).  The exact objective and
+ * feasibility separation models detect missing scenarios.  No complete
+ * scenario tree is constructed here.
  */
-void InstanceWriter::BuildInitialDecisionRuleMaster(CplexSolver& solver, double Bound)
+void InstanceWriter::BuildInitialDecisionRuleMaster(
+    CplexSolver& solver, double Bound, const std::function<void()>& checkDeadline)
 {
     Solver = &solver;
 
-    FullTree.BuildEntireTree(getPartition());
+    if (checkDeadline) checkDeadline();
 
     solver.CreateProblem(BaseName + "_DR_master");
     solver.SetMinimize();
@@ -110,45 +112,6 @@ void InstanceWriter::BuildInitialDecisionRuleMaster(CplexSolver& solver, double 
     }
 
     /*
-     * Assignment variables for all possible prefixes in the full tree.
-     *
-     * These are not all constrained initially, but adding them here keeps the
-     * model structure explicit. Later incremental rows can reference these
-     * variables without relying on implicit on-demand creation.
-     */
-    for (int t = 0; t < NumberOfStages - 1; ++t) {
-        for (const std::string& scenarioPrefix : FullTree.SubScenarios[t]) {
-            for (int b = 0; b < NumberOfBars; ++b) {
-                for (int i = 0; i < NumberOfItems; ++i) {
-                    solver.AddBinaryVariable(aName(scenarioPrefix, b, i));
-                }
-            }
-        }
-    }
-
-    /*
-     * Variables appearing in the final objective expression.
-     */
-    for (const std::string& scenario : FullTree.SubScenarios.back()) {
-        for (int b = 0; b < NumberOfBars; ++b) {
-            solver.AddContinuousVariable(rName(scenario, b), 0.0, MinimumRest);
-            solver.AddBinaryVariable(fName(scenario, b));
-            solver.AddBinaryVariable(nrName(scenario, b));
-        }
-    }
-
-    /*
-     * Bar-change variables for all non-final prefixes.
-     */
-    for (int t = 0; t < NumberOfStages - 1; ++t) {
-        for (const std::string& scenarioPrefix : FullTree.SubScenarios[t]) {
-            for (int b = 0; b < NumberOfBars; ++b) {
-                solver.AddContinuousVariable(wName(scenarioPrefix, b),0.0,1.0);
-            }
-        }
-    }
-
-    /*
      * Decision-rule coefficient variables.
      *
      * For P = 1, only yT/yTc are needed and they represent the linear
@@ -160,6 +123,7 @@ void InstanceWriter::BuildInitialDecisionRuleMaster(CplexSolver& solver, double 
      * rows are added for new scenarios.
      */
     for (int t = 0; t < NumberOfStages - 1; ++t) {
+        if (checkDeadline) checkDeadline();
         const int historyLength = NumberOfItems * (t + 1);
 
         for (int b = 0; b < NumberOfBars; ++b) {
@@ -181,47 +145,6 @@ void InstanceWriter::BuildInitialDecisionRuleMaster(CplexSolver& solver, double 
                 }
             }
         }
-    }
-
-    /*
-     * Objective epigraph:
-     *
-     *   cost(scenario) - obj <= 0
-     *
-     * for each complete scenario of the full tree.
-     */
-    const int objIndex = solver.RequireVariableIndex("obj");
-
-    for (const std::string& scenario : FullTree.SubScenarios.back()) {
-        std::vector<int> indices;
-        std::vector<double> coefficients;
-
-        for (int b = 0; b < NumberOfBars; ++b) {
-            indices.push_back(solver.RequireVariableIndex(rName(scenario, b)));
-            coefficients.push_back(CostPerUnit);
-        }
-
-        for (int b = 0; b < NumberOfBars; ++b) {
-            indices.push_back(solver.RequireVariableIndex(fName(scenario, b)));
-            coefficients.push_back(CostPerBar);
-        }
-
-        for (int t = 1; t < NumberOfStages; ++t) {
-            const std::string prefix = scenario.substr(0, static_cast<std::size_t>(t));
-            for (int b = 0; b < NumberOfBars; ++b) {
-                indices.push_back(solver.RequireVariableIndex(wName(prefix, b)));
-                coefficients.push_back(BarChangeCost);
-            }
-        }
-
-        indices.push_back(objIndex);
-        coefficients.push_back(-1.0);
-
-        solver.AddLinearConstraint("obj_epigraph_" + scenario,
-                                   indices,
-                                   coefficients,
-                                   'L',
-                                   0.0);
     }
 
     /*

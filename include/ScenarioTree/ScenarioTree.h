@@ -4,6 +4,7 @@
 #include <string>
 #include <algorithm>
 #include <random>
+#include <functional>
 #include "ScenarioEncoding.h"
 class Node{
 public:
@@ -26,7 +27,8 @@ public:
 	Node RootNode;
 	std::vector < std::vector< std::string > > SubScenarios;
 	std::vector < std::vector< int > > SubScenariosToNode;
-	int BuildEntireTree(std::vector< int >  Partition);
+	int BuildEntireTree(std::vector< int >  Partition,
+                        const std::function<void()>& checkDeadline = {});
 	int ExpandTree( std::vector< std::string >  AdditionalScenarios );
 	void CleanTree(std::vector< std::string > AdditionalScenarios = std::vector<std::string>());
 	void FilterNewScenarios(std::vector<std::string>& Scenarios) const;

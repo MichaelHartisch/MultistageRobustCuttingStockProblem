@@ -150,6 +150,7 @@ public:
    bool HasObjectiveValue() const;
    bool IsInfeasible() const;
    bool IsTimeLimit() const;
+   bool IsOptimal() const;
 
    /*
     * Legacy/debug file-based input. Should not be used by the final internal

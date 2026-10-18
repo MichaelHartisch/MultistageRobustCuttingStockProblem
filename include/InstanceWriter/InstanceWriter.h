@@ -2,6 +2,7 @@
 #define INSTANCE_WRITER_H_
 
 #include <cstddef>
+#include <functional>
 #include <random>
 #include <string>
 #include <vector>
@@ -93,8 +94,11 @@ public:
     void writeDR_12b(DR_Holder DR,std::string Line, int LineNr);
 
     // Internal CPLEX builders used by RunDecisionRule.
-    void BuildInitialDecisionRuleMaster(CplexSolver& solver, double Bound = 0.0);
-    void AddDecisionRuleMasterRowsForNewScenarios(CplexSolver& solver, const DR_Holder& decisionRule);
+    void BuildInitialDecisionRuleMaster(CplexSolver& solver, double Bound = 0.0,
+                                        const std::function<void()>& checkDeadline = {});
+    void AddDecisionRuleMasterRowsForNewScenarios(CplexSolver& solver,
+                                                   const DR_Holder& decisionRule,
+                                                   const std::function<void()>& checkDeadline = {});
     void BuildDecisionRuleObjectiveSeparationModel(CplexSolver& solver, const DR_Holder& decisionRule);
     std::vector<DecisionRuleSeparationTarget> PrepareDecisionRuleConstraintSeparationTargets(const DR_Holder& decisionRule);
     void BuildDecisionRuleConstraintSeparationModel(CplexSolver& solver,
